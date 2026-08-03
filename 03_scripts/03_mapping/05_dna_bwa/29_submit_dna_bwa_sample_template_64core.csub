@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Step 29 template: one complete DNA sample (8 lane pairs) per 64-CPU job.
+#
+# Do not submit this template directly. Step 30 renders __SAMPLE_INDEX__ to an
+# integer from 1 through 96 and submits the resulting job file.
+#
+#CSUB -J snMAR_DNA_BWA___SAMPLE_INDEX__
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/dna_bwa_full_jobs/sample___SAMPLE_INDEX__.out
+#CSUB -e 09_logs/03_mapping/dna_bwa_full_jobs/sample___SAMPLE_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+DNA_ALIGN_ENV="${DNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$DNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/03_mapping"
+INPUT_QC="${DNA_BWA_INPUT_QC_ROOT:-$PROJECT/08_qc_summary/10_dna_bwa_inputs}"
+SAMPLE_TABLE="$INPUT_QC/dna_bwa_samples.tsv"
+INDEX_PREFIX="${DNA_BWA_INDEX_PREFIX:-$PROJECT/02_reference/dna_human_pig_bwa/human_pig.prefixed}"
+INDEX_DIR="$(dirname "$INDEX_PREFIX")"
+OUTPUT_ROOT="${DNA_BWA_FULL_ROOT:-$PROJECT/06_mapping/dna_bwa_joint}"
+QC_ROOT="${DNA_BWA_FULL_QC_ROOT:-$PROJECT/08_qc_summary/12_dna_bwa_full}"
+TMP_ROOT="${DNA_BWA_FULL_TMP_ROOT:-$PROJECT/06_mapping/dna_bwa_tmp_full}"
+SAMPLE_INDEX="__SAMPLE_INDEX__"
+FORCE="${FORCE:-0}"
+
+[[ "$SAMPLE_INDEX" =~ ^[0-9]+$ ]] || {
+  echo "[ERROR] template was not rendered with a numeric SAMPLE_INDEX" >&2
+  exit 2
+}
+(( SAMPLE_INDEX >= 1 && SAMPLE_INDEX <= 96 )) || {
+  echo "[ERROR] SAMPLE_INDEX out of range: $SAMPLE_INDEX" >&2
+  exit 2
+}
+[[ "$FORCE" =~ ^[01]$ ]] || exit 2
+
+BWA_BIN="$(command -v "${BWA:-bwa}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+PIGZ_BIN="$(command -v "${PIGZ:-pigz}" || true)"
+for name in BWA_BIN SAMTOOLS_BIN PYTHON_BIN PIGZ_BIN; do
+  value="${!name}"
+  [[ -n "$value" && -x "$value" ]] || {
+    echo "[ERROR] unavailable executable: $name" >&2
+    exit 127
+  }
+done
+for path in \
+  "$SAMPLE_TABLE" \
+  "$MAPPING_DIR/05_dna_bwa/24_validate_dna_bwa_bam.py" \
+  "$MAPPING_DIR/05_dna_bwa/25_run_dna_bwa_one.sh" \
+  "$INDEX_DIR/.snmar_bwa_index_done.tsv"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+for suffix in amb ann bwt pac sa; do
+  [[ -s "$INDEX_PREFIX.$suffix" ]] || exit 2
+done
+
+row="$(awk -F '\t' -v wanted="$SAMPLE_INDEX" 'NR == wanted + 1 {print; exit}' "$SAMPLE_TABLE")"
+[[ -n "$row" ]] || {
+  echo "[ERROR] no sample-table row for SAMPLE_INDEX=$SAMPLE_INDEX" >&2
+  exit 2
+}
+IFS=$'\t' read -r observed_index sample group lane_pairs expected_pairs \
+  pair_ids r1_files r2_files <<< "$row"
+[[ "$observed_index" == "$SAMPLE_INDEX" ]] || {
+  echo "[ERROR] sample-table index mismatch: $observed_index != $SAMPLE_INDEX" >&2
+  exit 2
+}
+(( lane_pairs == 8 && expected_pairs >= 1 )) || {
+  echo "[ERROR] invalid sample manifest row: lanes=$lane_pairs pairs=$expected_pairs" >&2
+  exit 2
+}
+[[ "$group" == "GM12878" || "$group" == "cellMix" ]] || exit 2
+
+cd "$PROJECT"
+mkdir -p "$OUTPUT_ROOT" "$QC_ROOT/by_run" "$TMP_ROOT" \
+  "$PROJECT/09_logs/03_mapping/dna_bwa_full_jobs"
+
+export RUN_ID="$sample"
+export SAMPLE="$sample"
+export R1_FILES="$r1_files"
+export R2_FILES="$r2_files"
+export EXPECTED_PAIRS="$expected_pairs"
+export OUTPUT_ROOT QC_ROOT TMP_ROOT
+export BWA_BIN SAMTOOLS_BIN PYTHON_BIN PIGZ_BIN INDEX_PREFIX MAPPING_DIR
+export FORCE
+export MODE=full
+export MAX_PAIRS=0
+
+# The live pipeline remains close to the 64-CPU allocation:
+# BWA 44 + coordinate sort 12 + two 2-thread decompression streams = 60.
+# Global markdup is deliberately absent: different CB-tagged cells must not
+# be declared duplicates merely because their fragments share coordinates.
+export BWA_THREADS="${BWA_THREADS:-44}"
+export COORD_SORT_THREADS="${COORD_SORT_THREADS:-12}"
+export DECOMPRESS_THREADS="${DECOMPRESS_THREADS:-2}"
+export VALIDATE_THREADS="${VALIDATE_THREADS:-4}"
+export SORT_MEMORY="${SORT_MEMORY:-1G}"
+
+echo "[INFO] sample_index=$SAMPLE_INDEX sample=$sample group=$group"
+echo "[INFO] lane_pairs=$lane_pairs expected_clean_pairs=$expected_pairs"
+bash "$MAPPING_DIR/05_dna_bwa/25_run_dna_bwa_one.sh"
+echo "[OK] full DNA BWA sample completed: $sample"

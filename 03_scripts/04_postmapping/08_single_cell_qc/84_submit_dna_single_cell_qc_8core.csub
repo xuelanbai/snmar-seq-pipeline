@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Step 84: summarize complete per-cell WCG/GCH coverage QC.
+#
+#CSUB -J snMAR_DNA_single_cell_QC
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/84_dna_single_cell_qc.out
+#CSUB -e 09_logs/04_postmapping/84_dna_single_cell_qc.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+[[ -s "$POST_DIR/08_single_cell_qc/83_summarize_dna_single_cell_qc.py" ]] || exit 2
+
+mkdir -p "$PROJECT/09_logs/04_postmapping"
+cd "$PROJECT"
+"$PYTHON_BIN" "$POST_DIR/08_single_cell_qc/83_summarize_dna_single_cell_qc.py" \
+  --project "$PROJECT"

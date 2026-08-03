@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Step 79: final DNA/RNA complete-matrix integrity summary.
+#
+#CSUB -J snMAR_complete_final
+#CSUB -q c02
+#CSUB -n 4
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/complete_matrices/final.out
+#CSUB -e 09_logs/04_postmapping/complete_matrices/final.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py'
+mkdir -p "$PROJECT/09_logs/04_postmapping/complete_matrices"
+cd "$PROJECT"
+"$PYTHON_BIN" "$POST_DIR/07_matrix_packaging/78_summarize_complete_modalities.py" \
+  --project "$PROJECT"

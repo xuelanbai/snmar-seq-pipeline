@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Step 64: prepare global DNA single-cytosine indices and 768 task rows.
+#
+#CSUB -J snMAR_cytosine_prepare
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/single_cytosine/prepare.out
+#CSUB -e 09_logs/04_postmapping/single_cytosine/prepare.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+MIN_MAPQ="${MIN_MAPQ:-30}"
+MIN_BASEQ="${MIN_BASEQ:-20}"
+EXCLUDE_READ_ENDS="${EXCLUDE_READ_ENDS:-10}"
+
+for value in "$MIN_MAPQ" "$MIN_BASEQ" "$EXCLUDE_READ_ENDS"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+done
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, numpy'
+mkdir -p "$PROJECT/09_logs/04_postmapping/single_cytosine"
+cd "$PROJECT"
+"$PYTHON_BIN" "$POST_DIR/05_dna_single_cytosine/63_prepare_single_cytosine_full.py" \
+  --project "$PROJECT" \
+  --min-mapq "$MIN_MAPQ" \
+  --min-baseq "$MIN_BASEQ" \
+  --exclude-read-ends "$EXCLUDE_READ_ENDS"

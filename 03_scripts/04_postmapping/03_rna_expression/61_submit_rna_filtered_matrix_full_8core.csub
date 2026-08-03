@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Step 61: create the full filtered RNA matrix directly.
+#
+#CSUB -J snMAR_RNA_filtered_full
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/61_rna_filtered_matrix_full.out
+#CSUB -e 09_logs/04_postmapping/61_rna_filtered_matrix_full.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+MIN_EXACT_UMIS="${MIN_EXACT_UMIS:-10}"
+MIN_GENES="${MIN_GENES:-5}"
+
+for name in MIN_EXACT_UMIS MIN_GENES; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+  (( value >= 1 )) || exit 2
+done
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+for path in "$POST_DIR/01_input_validation/53_prepare_downstream_full.py" \
+  "$POST_DIR/03_rna_expression/60_filter_rna_reverse_matrix_full.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+cd "$PROJECT"
+mkdir -p "$PROJECT/09_logs/04_postmapping"
+"$PYTHON_BIN" "$POST_DIR/01_input_validation/53_prepare_downstream_full.py" \
+  --project "$PROJECT" \
+  --rna-min-umis "$MIN_EXACT_UMIS" \
+  --rna-min-genes "$MIN_GENES"
+"$PYTHON_BIN" "$POST_DIR/03_rna_expression/60_filter_rna_reverse_matrix_full.py" \
+  --project "$PROJECT" \
+  --min-exact-umis "$MIN_EXACT_UMIS" \
+  --min-genes "$MIN_GENES"

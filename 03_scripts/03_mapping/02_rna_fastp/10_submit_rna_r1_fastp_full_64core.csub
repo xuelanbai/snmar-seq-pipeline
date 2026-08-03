@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+# Step 10: full strict10 RNA R1-only fastp using 64 allocated CPUs.
+#
+# R1 starts with transcript sequence, so no fixed front structure is removed.
+# Barcode and UMI were already extracted during strict10 demultiplex and are
+# retained in the R1 FASTQ comment as CR/CB/CN/UR/UB tags.
+#
+# R2 is intentionally not read, trimmed, or written by this step.
+#
+# Default CPU plan:
+#   16 R1 files in parallel x 4 fastp threads = 64 fastp threads.
+#
+#CSUB -J snMAR_RNA_R1fastp64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/10_rna_r1_fastp_full64.out
+#CSUB -e 09_logs/03_mapping/10_rna_r1_fastp_full64.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate snTAPS_qc
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/03_mapping"
+SPLIT_ROOT="${RNA_SPLIT_ROOT:-$PROJECT/04_fastq_split/rna_strict10}"
+CLEAN_ROOT="${RNA_R1_CLEAN_ROOT:-$PROJECT/05_fastp/rna_r1_strict}"
+QC_ROOT="${RNA_R1_QC_ROOT:-$PROJECT/08_qc_summary/07_rna_r1_fastp_full}"
+JSON_ROOT="$QC_ROOT/fastp_json"
+LOG_ROOT="$PROJECT/09_logs/03_mapping/rna_r1_fastp_full_by_file"
+DEMUX_PER_PAIR="${RNA_DEMUX_PER_PAIR:-$PROJECT/08_qc_summary/02_rna_demultiplex/write_strict10_per_pair.tsv}"
+R1_TABLE="$QC_ROOT/rna_r1_files.tsv"
+FASTP_REQUESTED="${FASTP:-fastp}"
+PYTHON_REQUESTED="${PYTHON:-python}"
+FASTP="$(command -v "$FASTP_REQUESTED" || true)"
+PYTHON="$(command -v "$PYTHON_REQUESTED" || true)"
+
+export PARALLEL_FILES="${PARALLEL_FILES:-16}"
+export FASTP_THREADS="${FASTP_THREADS:-4}"
+export FASTP_COMPRESSION="${FASTP_COMPRESSION:-1}"
+export FORCE="${FORCE:-0}"
+
+for name in PARALLEL_FILES FASTP_THREADS FASTP_COMPRESSION FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] $name must be a non-negative integer: $value" >&2
+    exit 2
+  }
+done
+(( PARALLEL_FILES >= 1 )) || exit 2
+(( FASTP_THREADS >= 1 )) || exit 2
+(( FASTP_COMPRESSION >= 1 && FASTP_COMPRESSION <= 9 )) || exit 2
+(( FORCE == 0 || FORCE == 1 )) || exit 2
+
+cd "$PROJECT"
+mkdir -p "$CLEAN_ROOT" "$QC_ROOT" "$JSON_ROOT" "$LOG_ROOT"
+
+[[ -n "$FASTP" && -x "$FASTP" ]] || {
+  echo "[ERROR] fastp unavailable after activating snTAPS_qc" >&2
+  exit 127
+}
+[[ -n "$PYTHON" && -x "$PYTHON" ]] || {
+  echo "[ERROR] python unavailable after activating snTAPS_qc" >&2
+  exit 127
+}
+
+FASTP_VERSION="$("$FASTP" --version 2>&1 | head -n 1)"
+FASTP_VERSION="${FASTP_VERSION//$'\t'/ }"
+[[ -n "$FASTP_VERSION" ]] || {
+  echo "[ERROR] cannot determine fastp version" >&2
+  exit 65
+}
+
+for command_name in \
+  gzip awk xargs find sort head stat mv sha256sum wc date; do
+  command -v "$command_name" >/dev/null 2>&1 || {
+    echo "[ERROR] command not found: $command_name" >&2
+    exit 127
+  }
+done
+
+for script in \
+  "$MAPPING_DIR/02_rna_fastp/08_discover_rna_r1_assigned.py" \
+  "$MAPPING_DIR/02_rna_fastp/09_summarize_rna_r1_fastp_full.py"; do
+  [[ -s "$script" ]] || {
+    echo "[ERROR] missing script: $script" >&2
+    exit 2
+  }
+done
+[[ -s "$DEMUX_PER_PAIR" ]] || {
+  echo "[ERROR] missing RNA strict10 demultiplex table: $DEMUX_PER_PAIR" >&2
+  exit 2
+}
+
+"$PYTHON" "$MAPPING_DIR/02_rna_fastp/08_discover_rna_r1_assigned.py" \
+  --split-root "$SPLIT_ROOT" \
+  --out "$R1_TABLE" \
+  --expected-files 96
+
+run_one() {
+  set -uo pipefail
+
+  local pair_id="$1"
+  local sample="$2"
+  local raw_r1="$3"
+  local clean_dir="$CLEAN_ROOT/$sample"
+  local json_dir="$JSON_ROOT/$sample"
+  local clean_r1="$clean_dir/${pair_id}.clean_R1.fq.gz"
+  local json="$json_dir/${pair_id}.fastp.json"
+  local html="$json_dir/${pair_id}.fastp.html"
+  local log="$LOG_ROOT/${pair_id}.log"
+  local done_file="$LOG_ROOT/${pair_id}.done"
+  local failed_file="$LOG_ROOT/${pair_id}.failed"
+  local done_tmp="${done_file}.tmp.$$"
+  local expected_reads=""
+  local before_reads=""
+  local after_reads=""
+  local verified_reads=""
+  local raw_r1_bytes=""
+  local raw_r1_mtime=""
+  local clean_r1_bytes=""
+  local json_bytes=""
+  local html_bytes=""
+  local clean_r1_sha256=""
+  local rc=0
+
+  manifest_value() {
+    awk -F $'\t' -v key="$1" '$1 == key {print $2; exit}' "$done_file"
+  }
+
+  completed_ok() {
+    [[ -s "$done_file" && -s "$clean_r1" && \
+       -s "$json" && -s "$html" ]] || return 1
+    [[ "$(manifest_value status)" == "complete" ]] || return 1
+    [[ "$(manifest_value pipeline_signature)" == \
+       "rna_r1_se_fastp_v9" ]] || return 1
+    [[ "$(manifest_value pair_id)" == "$pair_id" ]] || return 1
+    [[ "$(manifest_value sample)" == "$sample" ]] || return 1
+    [[ "$(manifest_value raw_R1_path)" == "$raw_r1" ]] || return 1
+    [[ "$(manifest_value raw_R1_bytes)" == \
+       "$(stat -c '%s' "$raw_r1")" ]] || return 1
+    [[ "$(manifest_value raw_R1_mtime)" == \
+       "$(stat -c '%Y' "$raw_r1")" ]] || return 1
+    [[ "$(manifest_value fastp_version)" == "$FASTP_VERSION" ]] || return 1
+    [[ "$(manifest_value clean_R1_bytes)" == \
+       "$(stat -c '%s' "$clean_r1")" ]] || return 1
+    [[ "$(manifest_value json_bytes)" == \
+       "$(stat -c '%s' "$json")" ]] || return 1
+    [[ "$(manifest_value html_bytes)" == \
+       "$(stat -c '%s' "$html")" ]] || return 1
+    [[ "$(manifest_value clean_R1_sha256)" == \
+       "$(sha256sum "$clean_r1" | awk '{print $1}')" ]] || return 1
+    gzip -t "$clean_r1" || return 1
+
+    expected_reads=$(
+      awk -F $'\t' -v p="$pair_id" \
+        '$1 == p && $3 == "assigned_XD0" {print $4; exit}' \
+        "$DEMUX_PER_PAIR"
+    )
+    [[ "$expected_reads" =~ ^[1-9][0-9]*$ ]] || return 1
+
+    local json_counts=""
+    json_counts=$(
+      "$PYTHON" -c \
+        'import json,sys; s=json.load(open(sys.argv[1]))["summary"]; print(s["before_filtering"]["total_reads"],s["after_filtering"]["total_reads"])' \
+        "$json"
+    ) || return 1
+    read -r before_reads after_reads <<<"$json_counts"
+    [[ "$before_reads" =~ ^[1-9][0-9]*$ && \
+       "$after_reads" =~ ^[1-9][0-9]*$ ]] || return 1
+    (( before_reads == expected_reads && after_reads <= before_reads )) || return 1
+    [[ "$(manifest_value expected_input_R1_reads)" == \
+       "$expected_reads" ]] || return 1
+    [[ "$(manifest_value fastp_before_reads)" == "$before_reads" ]] || return 1
+    [[ "$(manifest_value fastp_after_reads)" == "$after_reads" ]] || return 1
+    [[ "$(manifest_value verified_output_R1_reads)" == \
+       "$after_reads" ]] || return 1
+    return 0
+  }
+
+  mkdir -p "$clean_dir" "$json_dir" || return 1
+
+  if [[ "$FORCE" -eq 0 ]] && completed_ok; then
+    rm -f "$failed_file" || return 1
+    echo "[INFO] skip completed R1: $pair_id"
+    return 0
+  fi
+  if [[ -e "$done_file" ]]; then
+    echo "[WARN] completion validation failed; reprocessing $pair_id" >&2
+  fi
+
+  rm -f \
+    "$done_file" "$failed_file" "$done_tmp" \
+    "$clean_r1" "$json" "$html" || return 1
+  : >"$log" || return 1
+
+  {
+    echo "[INFO] start=$pair_id"
+    echo "[INFO] sample=$sample"
+    echo "[INFO] mode=RNA_R1_single_end"
+    echo "[INFO] R1_front_structure_trim=0"
+    echo "[INFO] R2=not_processed"
+    echo "[INFO] fastp_threads=$FASTP_THREADS"
+    "$FASTP" --version 2>&1 || true
+
+    if [[ ! -s "$raw_r1" ]]; then
+      rc=66
+      echo "[ERROR] missing/empty strict RNA R1 input"
+    fi
+
+    if (( rc == 0 )); then
+      raw_r1_bytes=$(stat -c '%s' "$raw_r1") || rc=$?
+      raw_r1_mtime=$(stat -c '%Y' "$raw_r1") || rc=$?
+      if (( rc != 0 )); then
+        echo "[ERROR] cannot stat strict RNA R1 input"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      expected_reads=$(
+        awk -F $'\t' -v p="$pair_id" \
+          '$1 == p && $3 == "assigned_XD0" {print $4; exit}' \
+          "$DEMUX_PER_PAIR"
+      )
+      if [[ ! "$expected_reads" =~ ^[1-9][0-9]*$ ]]; then
+        rc=65
+        echo "[ERROR] invalid assigned_XD0 count: $expected_reads"
+      else
+        echo "[INFO] expected_input_R1_reads=$expected_reads"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      local -a fastp_cmd=(
+        "$FASTP"
+        --in1 "$raw_r1"
+        --out1 "$clean_r1"
+        --trim_front1 0
+        --qualified_quality_phred 20
+        --unqualified_percent_limit 30
+        --length_required 30
+        --cut_front
+        --cut_tail
+        --cut_window_size 4
+        --cut_mean_quality 20
+        --trim_poly_g
+        --poly_g_min_len 10
+        --trim_poly_x
+        --poly_x_min_len 10
+        --dont_eval_duplication
+        --compression "$FASTP_COMPRESSION"
+        --thread "$FASTP_THREADS"
+        --json "$json"
+        --html "$html"
+        --report_title "snMAR RNA strict10 R1-only $pair_id"
+      )
+      "${fastp_cmd[@]}" || rc=$?
+    fi
+
+    if (( rc == 0 )); then
+      if [[ ! -s "$clean_r1" || ! -s "$json" || ! -s "$html" ]]; then
+        rc=70
+        echo "[ERROR] missing/empty RNA R1 fastp output"
+      elif ! gzip -t "$clean_r1"; then
+        rc=65
+        echo "[ERROR] RNA R1 clean gzip integrity check failed"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      local json_counts=""
+      if ! json_counts=$(
+        "$PYTHON" -c \
+          'import json,sys; s=json.load(open(sys.argv[1]))["summary"]; print(s["before_filtering"]["total_reads"],s["after_filtering"]["total_reads"])' \
+          "$json"
+      ); then
+        rc=65
+        echo "[ERROR] cannot read fastp JSON counts"
+      else
+        read -r before_reads after_reads <<<"$json_counts"
+      fi
+      if (( rc == 0 )) && {
+           [[ ! "$before_reads" =~ ^[1-9][0-9]*$ ]] ||
+           [[ ! "$after_reads" =~ ^[1-9][0-9]*$ ]] ||
+           (( before_reads != expected_reads )) ||
+           (( after_reads > before_reads ))
+         }; then
+        rc=65
+        echo "[ERROR] invalid fastp R1 counts: before=$before_reads after=$after_reads expected=$expected_reads"
+      elif (( rc == 0 )); then
+        echo "[INFO] fastp_before_R1_reads=$before_reads"
+        echo "[INFO] fastp_after_R1_reads=$after_reads"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      verified_reads=$(
+        "$PYTHON" "$MAPPING_DIR/02_rna_fastp/09_summarize_rna_r1_fastp_full.py" \
+          --verify-clean-r1 "$clean_r1" \
+          --expected-output-reads "$after_reads"
+      ) || rc=$?
+      if (( rc == 0 )) && [[ "$verified_reads" != "$after_reads" ]]; then
+        rc=65
+        echo "[ERROR] unexpected clean R1 verifier output: $verified_reads"
+      elif (( rc == 0 )); then
+        echo "[INFO] verified_clean_R1_reads=$verified_reads"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      echo "[INFO] done=$pair_id"
+    fi
+  } >>"$log" 2>&1
+
+  if (( rc != 0 )); then
+    rm -f "$done_file" "$done_tmp" "$clean_r1" "$json" "$html" || true
+    {
+      printf 'pair_id\t%s\n' "$pair_id"
+      printf 'sample\t%s\n' "$sample"
+      printf 'exit_status\t%s\n' "$rc"
+      printf 'log\t%s\n' "$log"
+      printf 'time\t%s\n' "$(date -Is)"
+    } >"$failed_file"
+    echo "[ERROR] RNA R1 fastp failed: $pair_id (status=$rc)" >&2
+    tail -n 80 "$log" >&2 || true
+    return 1
+  fi
+
+  clean_r1_bytes=$(stat -c '%s' "$clean_r1") || return 1
+  json_bytes=$(stat -c '%s' "$json") || return 1
+  html_bytes=$(stat -c '%s' "$html") || return 1
+  clean_r1_sha256=$(sha256sum "$clean_r1" | awk '{print $1}') || return 1
+
+  [[ "$raw_r1_bytes" == "$(stat -c '%s' "$raw_r1")" && \
+     "$raw_r1_mtime" == "$(stat -c '%Y' "$raw_r1")" ]] || {
+    echo "[ERROR] RNA R1 input changed while processing: $pair_id" >&2
+    return 1
+  }
+  for size in "$clean_r1_bytes" "$json_bytes" "$html_bytes"; do
+    [[ "$size" =~ ^[1-9][0-9]*$ ]] || return 1
+  done
+  [[ "$clean_r1_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  {
+    printf 'status\tcomplete\n'
+    printf 'pipeline_signature\trna_r1_se_fastp_v9\n'
+    printf 'pair_id\t%s\n' "$pair_id"
+    printf 'sample\t%s\n' "$sample"
+    printf 'time\t%s\n' "$(date -Is)"
+    printf 'raw_R1_path\t%s\n' "$raw_r1"
+    printf 'raw_R1_bytes\t%s\n' "$raw_r1_bytes"
+    printf 'raw_R1_mtime\t%s\n' "$raw_r1_mtime"
+    printf 'fastp_version\t%s\n' "$FASTP_VERSION"
+    printf 'expected_input_R1_reads\t%s\n' "$expected_reads"
+    printf 'fastp_before_reads\t%s\n' "$before_reads"
+    printf 'fastp_after_reads\t%s\n' "$after_reads"
+    printf 'verified_output_R1_reads\t%s\n' "$verified_reads"
+    printf 'clean_R1_bytes\t%s\n' "$clean_r1_bytes"
+    printf 'json_bytes\t%s\n' "$json_bytes"
+    printf 'html_bytes\t%s\n' "$html_bytes"
+    printf 'clean_R1_sha256\t%s\n' "$clean_r1_sha256"
+  } >"$done_tmp" || return 1
+  mv -f -- "$done_tmp" "$done_file" || return 1
+  rm -f "$failed_file" || return 1
+  return 0
+}
+
+export -f run_one
+export \
+  MAPPING_DIR CLEAN_ROOT JSON_ROOT LOG_ROOT DEMUX_PER_PAIR FASTP PYTHON \
+  FASTP_VERSION FASTP_THREADS FASTP_COMPRESSION FORCE
+
+if ! tail -n +2 "$R1_TABLE" |
+  while IFS=$'\t' read -r pair_id sample r1; do
+    printf '%s\0%s\0%s\0' "$pair_id" "$sample" "$r1"
+  done |
+  xargs -0 -P "$PARALLEL_FILES" -n 3 bash -c 'run_one "$@"' _; then
+  failed_count=$(
+    find "$LOG_ROOT" -maxdepth 1 -type f -name '*.failed' | wc -l
+  )
+  echo "[ERROR] RNA R1 fastp had ${failed_count} failed file(s)." >&2
+  find "$LOG_ROOT" -maxdepth 1 -type f -name '*.failed' -print |
+    sort |
+    head -n 30 >&2
+  exit 1
+fi
+
+"$PYTHON" "$MAPPING_DIR/02_rna_fastp/09_summarize_rna_r1_fastp_full.py" \
+  --r1-table "$R1_TABLE" \
+  --demux-per-pair "$DEMUX_PER_PAIR" \
+  --clean-root "$CLEAN_ROOT" \
+  --json-root "$JSON_ROOT" \
+  --done-root "$LOG_ROOT" \
+  --summary "$QC_ROOT/rna_r1_fastp_full_summary.tsv" \
+  --per-file "$QC_ROOT/rna_r1_fastp_full_per_file.tsv"
+
+echo "[INFO] full RNA R1-only fastp complete: $(date -Is)"

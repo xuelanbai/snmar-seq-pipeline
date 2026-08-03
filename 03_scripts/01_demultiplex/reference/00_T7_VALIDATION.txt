@@ -1,0 +1,17 @@
+T7 whitelist validation record
+
+Sources:
+- Current snMAR T7/linker workbook supplied for the 2607 library.
+- Previous snTAPS T7 whitelist used by the reference workflow.
+
+Result:
+- The current workbook contains T7-1 through T7-96 (96 rows).
+- All 96 sequences exactly match the corresponding previous T7 entries.
+- Mismatches: 0.
+- Duplicate sequences among the current 96 entries: 0.
+- Previous T7-97 through T7-384 entries are outside the current workbook and
+  are excluded from the current whitelist.
+- Linker lengths: 22, 23, 24 and 25 bp, with 24 rows at each length.
+
+Repository whitelist:
+03_scripts/01_demultiplex/index/T7.current96.tsv

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Step 47 template: one balanced 24-file RNA exact-UMI shard.
+#
+#CSUB -J snMAR_RNA_UMIF___SHARD_INDEX__
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/rna_reverse_genefull_full/shard___SHARD_INDEX__.out
+#CSUB -e 09_logs/04_postmapping/rna_reverse_genefull_full/shard___SHARD_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+MANIFEST="$PROJECT/08_qc_summary/14_postmapping_full_inputs/rna_reverse_genefull_full_manifest.tsv"
+JOINT_GTF="${JOINT_GTF:-$PROJECT/02_reference/rna_human_pig_joint/human_pig.prefixed.gtf}"
+OUTPUT_ROOT="$PROJECT/07_postmapping/rna_reverse_genefull_full/by_file"
+LOG_ROOT="$PROJECT/09_logs/04_postmapping/rna_reverse_genefull_full/by_file"
+SHARD_INDEX="__SHARD_INDEX__"
+PARALLEL_FILES="${PARALLEL_FILES:-8}"
+SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-2}"
+FORCE="${FORCE:-0}"
+
+[[ "$SHARD_INDEX" =~ ^[1-4]$ ]] || {
+  echo "[ERROR] unresolved or invalid SHARD_INDEX: $SHARD_INDEX" >&2
+  exit 2
+}
+for name in PARALLEL_FILES SAMTOOLS_THREADS FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+done
+(( PARALLEL_FILES >= 1 && SAMTOOLS_THREADS >= 1 && \
+  PARALLEL_FILES * SAMTOOLS_THREADS <= 32 && FORCE <= 1 )) || exit 2
+
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || exit 127
+for path in "$MANIFEST" "$JOINT_GTF" \
+  "$POST_DIR/03_rna_expression/46_count_rna_reverse_genefull_one.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+shard_rows="$(awk -F '\t' -v shard="$SHARD_INDEX" \
+  'NR > 1 && $2 == shard {count++} END {print count+0}' "$MANIFEST")"
+(( shard_rows == 24 )) || {
+  echo "[ERROR] expected 24 files in shard $SHARD_INDEX, found $shard_rows" >&2
+  exit 2
+}
+
+cd "$PROJECT"
+mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT" \
+  "$PROJECT/09_logs/04_postmapping/rna_reverse_genefull_full"
+
+run_one() {
+  local pair_id="$1"
+  local sample="$2"
+  local expected_input="$3"
+  local expected_primary="$4"
+  local bam="$5"
+  local out_dir="$OUTPUT_ROOT/$pair_id"
+  local summary="$out_dir/$pair_id.summary.json"
+  local log="$LOG_ROOT/$pair_id.log"
+  mkdir -p "$out_dir"
+  if (( FORCE == 0 )) && [[ -s "$summary" ]]; then
+    echo "[INFO] existing validated-file candidate; skipping: $pair_id"
+    return 0
+  fi
+  "$PYTHON_BIN" "$POST_DIR/03_rna_expression/46_count_rna_reverse_genefull_one.py" \
+    --bam "$bam" \
+    --gtf "$JOINT_GTF" \
+    --sample "$sample" \
+    --pair-id "$pair_id" \
+    --expected-input-reads "$expected_input" \
+    --expected-primary-mapped "$expected_primary" \
+    --out-dir "$out_dir" \
+    --samtools "$SAMTOOLS_BIN" \
+    --threads "$SAMTOOLS_THREADS" \
+    > "$log" 2>&1
+}
+export -f run_one
+export PROJECT POST_DIR JOINT_GTF OUTPUT_ROOT LOG_ROOT
+export PYTHON_BIN SAMTOOLS_BIN SAMTOOLS_THREADS FORCE
+
+awk -F '\t' -v shard="$SHARD_INDEX" \
+  'NR > 1 && $2 == shard {print $4, $5, $6, $7, $9}' "$MANIFEST" |
+  xargs -r -P "$PARALLEL_FILES" -n 5 bash -c \
+    'run_one "$1" "$2" "$3" "$4" "$5"' _
+
+echo "[OK] RNA reverse GeneFull shard completed: $SHARD_INDEX"

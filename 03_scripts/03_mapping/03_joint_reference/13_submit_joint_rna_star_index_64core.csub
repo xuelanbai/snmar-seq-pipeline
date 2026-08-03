@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# Step 13: build a 64-core STAR index for species-prefixed human+pig RNA mapping.
+#
+#CSUB -J snMAR_jointRNA_STARindex64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/13_joint_rna_star_index64.out
+#CSUB -e 09_logs/03_mapping/13_joint_rna_star_index64.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+RNA_ALIGN_ENV="${RNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$RNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/03_mapping"
+REF_ROOT="${RNA_JOINT_REF_ROOT:-$PROJECT/02_reference/rna_human_pig_joint}"
+JOINT_FASTA="$REF_ROOT/human_pig.prefixed.fa"
+JOINT_GTF="$REF_ROOT/human_pig.prefixed.gtf"
+REF_MANIFEST="$REF_ROOT/reference_manifest.tsv"
+INDEX_DIR="${RNA_STAR_INDEX:-$REF_ROOT/star_index_sjdb149}"
+
+HUMAN_FASTA="${HUMAN_FASTA:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_project/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa}"
+HUMAN_GTF="${HUMAN_GTF:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_project/reference/Homo_sapiens.GRCh38.115.gtf.gz}"
+PIG_FASTA="${PIG_FASTA:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_pig/reference/Sus_scrofa.Sscrofa11.1.dna.toplevel.fa}"
+PIG_GTF="${PIG_GTF:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_pig/reference/Sus_scrofa.Sscrofa11.1.115.gtf.gz}"
+
+STAR_REQUESTED="${STAR:-STAR}"
+PYTHON_REQUESTED="${PYTHON:-python}"
+STAR_BIN="$(command -v "$STAR_REQUESTED" || true)"
+PYTHON_BIN="$(command -v "$PYTHON_REQUESTED" || true)"
+
+THREADS="${THREADS:-64}"
+SJDB_OVERHANG="${SJDB_OVERHANG:-149}"
+LIMIT_GENOME_GENERATE_RAM="${LIMIT_GENOME_GENERATE_RAM:-300000000000}"
+FORCE_REFERENCE="${FORCE_REFERENCE:-0}"
+FORCE_INDEX="${FORCE_INDEX:-0}"
+
+for name in THREADS SJDB_OVERHANG LIMIT_GENOME_GENERATE_RAM \
+  FORCE_REFERENCE FORCE_INDEX; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] $name must be a non-negative integer: $value" >&2
+    exit 2
+  }
+done
+(( THREADS >= 1 )) || exit 2
+(( SJDB_OVERHANG >= 1 )) || exit 2
+(( LIMIT_GENOME_GENERATE_RAM >= 10000000000 )) || {
+  echo "[ERROR] LIMIT_GENOME_GENERATE_RAM is implausibly small" >&2
+  exit 2
+}
+(( FORCE_REFERENCE == 0 || FORCE_REFERENCE == 1 )) || exit 2
+(( FORCE_INDEX == 0 || FORCE_INDEX == 1 )) || exit 2
+
+cd "$PROJECT"
+mkdir -p "$REF_ROOT" "$PROJECT/09_logs/03_mapping"
+
+[[ -n "$STAR_BIN" && -x "$STAR_BIN" ]] || {
+  echo "[ERROR] STAR not found after activating snTAPS_qc." >&2
+  echo "[ERROR] Set STAR=/absolute/path/to/STAR and resubmit." >&2
+  exit 127
+}
+[[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python not found after activating snTAPS_qc" >&2
+  exit 127
+}
+for path in "$HUMAN_FASTA" "$HUMAN_GTF" "$PIG_FASTA" "$PIG_GTF"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty reference input: $path" >&2
+    exit 2
+  }
+done
+[[ -s "$MAPPING_DIR/03_joint_reference/12_prepare_joint_rna_reference.py" ]] || {
+  echo "[ERROR] missing step 12 script" >&2
+  exit 2
+}
+
+STAR_VERSION="$("$STAR_BIN" --version 2>&1 | head -n 1)"
+STAR_VERSION="${STAR_VERSION//$'\t'/ }"
+[[ -n "$STAR_VERSION" ]] || {
+  echo "[ERROR] cannot determine STAR version" >&2
+  exit 65
+}
+
+if (( FORCE_REFERENCE == 1 )); then
+  "$PYTHON_BIN" "$MAPPING_DIR/03_joint_reference/12_prepare_joint_rna_reference.py" \
+    --human-fasta "$HUMAN_FASTA" \
+    --human-gtf "$HUMAN_GTF" \
+    --pig-fasta "$PIG_FASTA" \
+    --pig-gtf "$PIG_GTF" \
+    --out-fasta "$JOINT_FASTA" \
+    --out-gtf "$JOINT_GTF" \
+    --manifest "$REF_MANIFEST" \
+    --force
+elif [[ ! -s "$JOINT_FASTA" || ! -s "$JOINT_GTF" || \
+        ! -s "$REF_MANIFEST" ]]; then
+  "$PYTHON_BIN" "$MAPPING_DIR/03_joint_reference/12_prepare_joint_rna_reference.py" \
+    --human-fasta "$HUMAN_FASTA" \
+    --human-gtf "$HUMAN_GTF" \
+    --pig-fasta "$PIG_FASTA" \
+    --pig-gtf "$PIG_GTF" \
+    --out-fasta "$JOINT_FASTA" \
+    --out-gtf "$JOINT_GTF" \
+    --manifest "$REF_MANIFEST"
+else
+  echo "[SKIP] existing combined FASTA/GTF/manifest retained"
+fi
+
+done_file="$INDEX_DIR/.snmar_star_index_done.tsv"
+manifest_value() {
+  local key="$1"
+  awk -F $'\t' -v key="$key" '$1 == key {print $2; exit}' "$done_file"
+}
+
+index_complete() {
+  [[ -s "$done_file" ]] || return 1
+  for file in Genome SA SAindex chrName.txt chrLength.txt chrStart.txt \
+    genomeParameters.txt; do
+    [[ -s "$INDEX_DIR/$file" ]] || return 1
+  done
+  [[ "$(manifest_value pipeline_signature)" == \
+     "snmar_joint_rna_star_index_v10" ]] || return 1
+  [[ "$(manifest_value star_version)" == "$STAR_VERSION" ]] || return 1
+  [[ "$(manifest_value sjdb_overhang)" == "$SJDB_OVERHANG" ]] || return 1
+  [[ "$(manifest_value joint_fasta_path)" == "$JOINT_FASTA" ]] || return 1
+  [[ "$(manifest_value joint_gtf_path)" == "$JOINT_GTF" ]] || return 1
+  [[ "$(manifest_value joint_fasta_bytes)" == \
+     "$(stat -c '%s' "$JOINT_FASTA")" ]] || return 1
+  [[ "$(manifest_value joint_fasta_mtime)" == \
+     "$(stat -c '%Y' "$JOINT_FASTA")" ]] || return 1
+  [[ "$(manifest_value joint_gtf_bytes)" == \
+     "$(stat -c '%s' "$JOINT_GTF")" ]] || return 1
+  [[ "$(manifest_value joint_gtf_mtime)" == \
+     "$(stat -c '%Y' "$JOINT_GTF")" ]] || return 1
+}
+
+if index_complete && (( FORCE_INDEX == 0 )); then
+  echo "[SKIP] validated STAR index already exists: $INDEX_DIR"
+  exit 0
+fi
+if [[ -e "$INDEX_DIR" && $FORCE_INDEX -ne 1 ]]; then
+  echo "[ERROR] STAR index exists but validation failed: $INDEX_DIR" >&2
+  echo "[ERROR] Review it, then set FORCE_INDEX=1 to rebuild." >&2
+  exit 65
+fi
+
+build_dir="$REF_ROOT/.star_index_build.$$"
+case "$build_dir" in
+  "$REF_ROOT"/.star_index_build.*) ;;
+  *)
+    echo "[ERROR] unsafe temporary index path: $build_dir" >&2
+    exit 65
+    ;;
+esac
+rm -rf -- "$build_dir"
+mkdir -p "$build_dir"
+cleanup() {
+  rc=$?
+  if [[ -d "$build_dir" ]]; then
+    rm -rf -- "$build_dir"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+echo "[INFO] STAR version: $STAR_VERSION"
+echo "[INFO] building joint index in $build_dir"
+"$STAR_BIN" \
+  --runMode genomeGenerate \
+  --runThreadN "$THREADS" \
+  --genomeDir "$build_dir" \
+  --genomeFastaFiles "$JOINT_FASTA" \
+  --sjdbGTFfile "$JOINT_GTF" \
+  --sjdbOverhang "$SJDB_OVERHANG" \
+  --limitGenomeGenerateRAM "$LIMIT_GENOME_GENERATE_RAM" \
+  --outFileNamePrefix "$build_dir/index."
+
+for file in Genome SA SAindex chrName.txt chrLength.txt chrStart.txt \
+  genomeParameters.txt; do
+  [[ -s "$build_dir/$file" ]] || {
+    echo "[ERROR] STAR did not produce $file" >&2
+    exit 65
+  }
+done
+
+{
+  printf 'pipeline_signature\tsnmar_joint_rna_star_index_v10\n'
+  printf 'star_version\t%s\n' "$STAR_VERSION"
+  printf 'sjdb_overhang\t%s\n' "$SJDB_OVERHANG"
+  printf 'joint_fasta_path\t%s\n' "$JOINT_FASTA"
+  printf 'joint_fasta_bytes\t%s\n' "$(stat -c '%s' "$JOINT_FASTA")"
+  printf 'joint_fasta_mtime\t%s\n' "$(stat -c '%Y' "$JOINT_FASTA")"
+  printf 'joint_gtf_path\t%s\n' "$JOINT_GTF"
+  printf 'joint_gtf_bytes\t%s\n' "$(stat -c '%s' "$JOINT_GTF")"
+  printf 'joint_gtf_mtime\t%s\n' "$(stat -c '%Y' "$JOINT_GTF")"
+  printf 'completed_utc\t%s\n' "$(date -u +%FT%TZ)"
+} >"$build_dir/.snmar_star_index_done.tsv"
+
+if [[ -e "$INDEX_DIR" ]]; then
+  case "$INDEX_DIR" in
+    "$REF_ROOT"/star_index_*) ;;
+    *)
+      echo "[ERROR] refusing to replace unsafe index path: $INDEX_DIR" >&2
+      exit 65
+      ;;
+  esac
+  rm -rf -- "$INDEX_DIR"
+fi
+mv -- "$build_dir" "$INDEX_DIR"
+trap - EXIT
+echo "[OK] joint human+pig STAR index: $INDEX_DIR"

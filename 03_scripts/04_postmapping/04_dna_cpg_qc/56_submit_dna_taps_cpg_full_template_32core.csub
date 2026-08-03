@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Step 56 template: one DNA sample, eight contig shards in parallel.
+#
+#CSUB -J snMAR_DNA_TAPS_F___SAMPLE_INDEX__
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/dna_taps_cpg_full/sample___SAMPLE_INDEX__.out
+#CSUB -e 09_logs/04_postmapping/dna_taps_cpg_full/sample___SAMPLE_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+INPUT_ROOT="$PROJECT/08_qc_summary/17_downstream_full_inputs"
+MANIFEST="$INPUT_ROOT/dna_taps_cpg_full_manifest.tsv"
+CONTIG_ROOT="$INPUT_ROOT/dna_contig_shards"
+JOINT_FASTA="${JOINT_FASTA:-$PROJECT/02_reference/rna_human_pig_joint/human_pig.prefixed.fa}"
+OUTPUT_ROOT="$PROJECT/07_postmapping/dna_taps_cpg_full"
+TMP_ROOT="${DNA_TAPS_TMP_ROOT:-$PROJECT/07_postmapping/tmp_dna_taps_cpg_full}"
+LOG_ROOT="$PROJECT/09_logs/04_postmapping/dna_taps_cpg_full/by_shard"
+SAMPLE_INDEX="__SAMPLE_INDEX__"
+CONTIG_SHARDS="${CONTIG_SHARDS:-8}"
+SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-4}"
+MIN_MAPQ="${MIN_MAPQ:-30}"
+MIN_BASEQ="${MIN_BASEQ:-20}"
+BIN_SIZE="${BIN_SIZE:-100000}"
+FORCE="${FORCE:-__FORCE__}"
+CLEANUP_SHARDS="${CLEANUP_SHARDS:-1}"
+
+for name in SAMPLE_INDEX CONTIG_SHARDS SAMTOOLS_THREADS MIN_MAPQ MIN_BASEQ \
+  BIN_SIZE FORCE CLEANUP_SHARDS; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+done
+(( SAMPLE_INDEX >= 1 && SAMPLE_INDEX <= 96 && \
+  CONTIG_SHARDS >= 1 && SAMTOOLS_THREADS >= 1 && \
+  CONTIG_SHARDS * SAMTOOLS_THREADS <= 32 && BIN_SIZE >= 1 && \
+  FORCE <= 1 && CLEANUP_SHARDS <= 1 )) || exit 2
+
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || exit 127
+for path in "$MANIFEST" "$JOINT_FASTA" "$JOINT_FASTA.fai" \
+  "$POST_DIR/04_dna_cpg_qc/54_call_dna_taps_cpg_full_shard.py" \
+  "$POST_DIR/04_dna_cpg_qc/55_merge_dna_taps_cpg_full_sample.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+row="$(awk -F '\t' -v wanted="$SAMPLE_INDEX" \
+  'NR > 1 && $1 == wanted {print; exit}' "$MANIFEST")"
+[[ -n "$row" ]] || {
+  echo "[ERROR] missing DNA full manifest row: $SAMPLE_INDEX" >&2
+  exit 2
+}
+IFS=$'\t' read -r observed run_id sample group retained input_bam <<< "$row"
+[[ "$observed" == "$SAMPLE_INDEX" && "$run_id" == "$sample" ]] || exit 2
+[[ -s "$input_bam" ]] || {
+  echo "[ERROR] missing/empty input BAM: $input_bam" >&2
+  exit 2
+}
+
+sample_output="$OUTPUT_ROOT/$sample"
+final_summary="$sample_output/$sample.taps_cpg_full.summary.tsv"
+if (( FORCE == 0 )) && [[ -s "$final_summary" ]] && \
+  awk -F '\t' -v bam="$input_bam" \
+    '$1 == "status" && $2 == "validated" {ok=1}
+     $1 == "input_bam" && $2 == bam {same=1}
+     END {exit !(ok && same)}' "$final_summary"; then
+  echo "[SKIP] existing validated full DNA TAPS output: $sample"
+  exit 0
+fi
+
+cd "$PROJECT"
+sample_tmp="$TMP_ROOT/$sample"
+mkdir -p "$sample_tmp" "$sample_output" "$LOG_ROOT/$sample" \
+  "$PROJECT/09_logs/04_postmapping/dna_taps_cpg_full"
+
+run_shard() {
+  local shard="$1"
+  local padded
+  padded="$(printf '%02d' "$shard")"
+  local contigs="$CONTIG_ROOT/shard_${padded}.contigs.txt"
+  local out_dir="$sample_tmp/shard_${padded}"
+  local summary="$out_dir/$sample.shard_${padded}.summary.tsv"
+  local log="$LOG_ROOT/$sample/shard_${padded}.log"
+  [[ -s "$contigs" ]] || exit 2
+  mkdir -p "$out_dir"
+  if (( FORCE == 0 )) && [[ -s "$summary" ]] && \
+    awk -F '\t' '$1 == "status" && $2 == "validated" {ok=1} END {exit !ok}' \
+      "$summary"; then
+    echo "[SKIP] validated shard: $sample shard=$shard"
+    return 0
+  fi
+  "$PYTHON_BIN" "$POST_DIR/04_dna_cpg_qc/54_call_dna_taps_cpg_full_shard.py" \
+    --sample "$sample" \
+    --bam "$input_bam" \
+    --fasta "$JOINT_FASTA" \
+    --contig-file "$contigs" \
+    --shard "$shard" \
+    --out-dir "$out_dir" \
+    --samtools "$SAMTOOLS_BIN" \
+    --threads "$SAMTOOLS_THREADS" \
+    --min-mapq "$MIN_MAPQ" \
+    --min-baseq "$MIN_BASEQ" \
+    --bin-size "$BIN_SIZE" \
+    > "$log" 2>&1
+}
+export -f run_shard
+export PROJECT POST_DIR CONTIG_ROOT JOINT_FASTA OUTPUT_ROOT LOG_ROOT
+export sample sample_tmp input_bam PYTHON_BIN SAMTOOLS_BIN SAMTOOLS_THREADS
+export MIN_MAPQ MIN_BASEQ BIN_SIZE FORCE
+
+seq 1 "$CONTIG_SHARDS" |
+  xargs -r -P "$CONTIG_SHARDS" -n 1 bash -c 'run_shard "$1"' _
+
+merge_args=(
+  --sample "$sample"
+  --bam "$input_bam"
+  --shard-root "$sample_tmp"
+  --output-root "$OUTPUT_ROOT"
+  --expected-shards "$CONTIG_SHARDS"
+)
+if (( CLEANUP_SHARDS == 1 )); then
+  merge_args+=(--cleanup-shards)
+fi
+"$PYTHON_BIN" "$POST_DIR/04_dna_cpg_qc/55_merge_dna_taps_cpg_full_sample.py" \
+  "${merge_args[@]}"
+
+echo "[OK] full DNA TAPS sample completed: $sample"

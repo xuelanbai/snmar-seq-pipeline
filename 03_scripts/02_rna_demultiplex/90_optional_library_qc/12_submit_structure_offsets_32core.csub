@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Step 12: submit the read-only 32-core RNA linker/T5 structure diagnostic.
+#CSUB -J snMAR_RNAstruct32
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -o 09_logs/02_rna_demultiplex/12_structure_offsets32.out
+#CSUB -e 09_logs/02_rna_demultiplex/12_structure_offsets32.err
+
+set -euo pipefail
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/02_rna_demultiplex"
+cd "$PROJECT"
+mkdir -p 08_qc_summary/02_rna_demultiplex/structure_probe
+mkdir -p 09_logs/02_rna_demultiplex
+
+export PROJECT
+export JOBS=32
+source "$SCRIPT_ROOT/01_config.sh"
+
+"$PYTHON" "$SCRIPT_ROOT/03_discover_rna_fastq_pairs.py" \
+  --raw-root "$RAW_ROOT" \
+  --out "$QC_ROOT/pairs.tsv" \
+  --expected-samples "$EXPECTED_SAMPLES"
+
+"$PYTHON" "$SCRIPT_ROOT/90_optional_library_qc/11_probe_rna_structure_offsets.py" \
+  --pair-table "$QC_ROOT/pairs.tsv" \
+  --t7-linker "$T7_LINKER_TABLE" \
+  --t5 "$T5_TABLE" \
+  --i7 "$I7_TABLE" \
+  --i5 "$I5_TABLE" \
+  --out-dir "$QC_ROOT/structure_probe" \
+  --jobs "$JOBS" \
+  --max-reads 200000 \
+  --scan-left 8 \
+  --scan-right 64 \
+  --umi-length 8 \
+  --polyt-length 31

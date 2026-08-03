@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Step 72 template: aggregate one global WCG/GCH pseudo-bulk track shard.
+# Template only: do not submit directly; use step 73.
+#
+#CSUB -J snMAR_CytTrack___SHARD__
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/single_cytosine/track/shard___SHARD__.out
+#CSUB -e 09_logs/04_postmapping/single_cytosine/track/shard___SHARD__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+SHARD="__SHARD__"
+FORCE="${FORCE:-__FORCE__}"
+
+if [[ "$SHARD" == "__SHARD__" || "$FORCE" == "__FORCE__" ]]; then
+  echo "[ERROR] step 72 is an unrendered job template." >&2
+  echo "[HINT] submit track mergers through step 73." >&2
+  exit 2
+fi
+
+[[ "$SHARD" =~ ^[0-9]+$ && "$FORCE" =~ ^[0-9]+$ ]] || exit 2
+(( SHARD >= 1 && SHARD <= 8 && FORCE <= 1 )) || exit 2
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+script="$POST_DIR/06_dna_signal_tracks/71_aggregate_single_cytosine_track_shard.py"
+summary="$PROJECT/08_qc_summary/22_dna_single_cytosine_tracks/dna_single_cytosine.track_shard_$(printf '%02d' "$SHARD").summary.tsv"
+[[ -s "$script" ]] || exit 2
+if (( FORCE == 0 )) && [[ -s "$summary" ]] && \
+  awk -F '\t' '$1 == "status" && $2 == "validated" {ok=1} END {exit !ok}' \
+    "$summary"; then
+  echo "[SKIP] validated track shard: $SHARD"
+  exit 0
+fi
+mkdir -p "$PROJECT/09_logs/04_postmapping/single_cytosine/track"
+cd "$PROJECT"
+"$PYTHON_BIN" "$script" --project "$PROJECT" --shard "$SHARD"

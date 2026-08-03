@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Step 69 template: validate eight context-aware cytosine shards for one sample.
+# Template only: do not submit directly; use step 70.
+#
+#CSUB -J snMAR_CytVal___SAMPLE_INDEX__
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/single_cytosine/validate/sample___SAMPLE_INDEX__.out
+#CSUB -e 09_logs/04_postmapping/single_cytosine/validate/sample___SAMPLE_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+SAMPLE_INDEX="__SAMPLE_INDEX__"
+FORCE="${FORCE:-__FORCE__}"
+VALIDATION_SIGNATURE="snmar_single_cytosine_validation_20260801"
+
+if [[ "$SAMPLE_INDEX" == "__SAMPLE_INDEX__" || "$FORCE" == "__FORCE__" ]]; then
+  echo "[ERROR] step 69 is an unrendered job template." >&2
+  echo "[HINT] submit validators through step 70." >&2
+  exit 2
+fi
+
+[[ "$SAMPLE_INDEX" =~ ^[0-9]+$ && "$FORCE" =~ ^[0-9]+$ ]] || exit 2
+(( SAMPLE_INDEX >= 1 && SAMPLE_INDEX <= 96 && FORCE <= 1 )) || exit 2
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, numpy'
+tasks="$PROJECT/08_qc_summary/20_single_cytosine_inputs/dna_single_cytosine_tasks.tsv"
+[[ -s "$tasks" && -s "$POST_DIR/05_dna_single_cytosine/68_validate_dna_single_cytosine_sample.py" ]] || \
+  exit 2
+sample="$(awk -F '\t' -v wanted="$SAMPLE_INDEX" \
+  'NR > 1 && $2 == wanted {print $3; exit}' "$tasks")"
+[[ -n "$sample" ]] || exit 2
+summary="$PROJECT/08_qc_summary/21_dna_single_cytosine_validation/$sample/$sample.single_cytosine.validation_summary.tsv"
+if (( FORCE == 0 )) && [[ -s "$summary" ]] && \
+  awk -F '\t' -v signature="$VALIDATION_SIGNATURE" \
+    '$1 == "status" && $2 == "validated" {status=1} \
+     $1 == "pipeline_signature" && $2 == signature {version=1} \
+     END {exit !(status && version)}' \
+    "$summary"; then
+  echo "[SKIP] validated sample: $SAMPLE_INDEX $sample"
+  exit 0
+fi
+mkdir -p "$PROJECT/09_logs/04_postmapping/single_cytosine/validate"
+cd "$PROJECT"
+"$PYTHON_BIN" "$POST_DIR/05_dna_single_cytosine/68_validate_dna_single_cytosine_sample.py" \
+  --project "$PROJECT" \
+  --sample-index "$SAMPLE_INDEX"

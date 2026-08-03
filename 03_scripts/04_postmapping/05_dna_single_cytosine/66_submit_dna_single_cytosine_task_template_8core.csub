@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Template only: do not submit directly; use step 67 to render task indices.
+#CSUB -J snMAR_Cyt___TASK_INDEX__
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/single_cytosine/call/task___TASK_INDEX__.out
+#CSUB -e 09_logs/04_postmapping/single_cytosine/call/task___TASK_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+INPUT_ROOT="$PROJECT/08_qc_summary/20_single_cytosine_inputs"
+TASKS="$INPUT_ROOT/dna_single_cytosine_tasks.tsv"
+PREP_SUMMARY="$INPUT_ROOT/single_cytosine_prepare_summary.tsv"
+TASK_INDEX="__TASK_INDEX__"
+SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-4}"
+FORCE="${FORCE:-__FORCE__}"
+
+if [[ "$TASK_INDEX" == "__TASK_INDEX__" || "$FORCE" == "__FORCE__" ]]; then
+  echo "[ERROR] step 66 is an unrendered job template." >&2
+  echo "[HINT] submit tasks through step 67, not with 'csub < 66_...'." >&2
+  exit 2
+fi
+
+for name in TASK_INDEX SAMTOOLS_THREADS FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] $name must be an integer; observed: $value" >&2
+    exit 2
+  }
+done
+(( TASK_INDEX >= 1 && TASK_INDEX <= 768 && \
+  SAMTOOLS_THREADS >= 1 && SAMTOOLS_THREADS <= 8 && FORCE <= 1 )) || {
+  echo "[ERROR] invalid task/thread/FORCE range" >&2
+  exit 2
+}
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || {
+  echo "[ERROR] python or samtools is unavailable in the active environment" >&2
+  exit 127
+}
+"$PYTHON_BIN" -c 'import h5py, numpy'
+for path in "$TASKS" "$PREP_SUMMARY" \
+  "$POST_DIR/05_dna_single_cytosine/65_call_dna_single_cytosine_task.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+awk -F '\t' '$1 == "status" && $2 == "validated" {ok=1} END {exit !ok}' \
+  "$PREP_SUMMARY"
+
+row="$(awk -F '\t' -v wanted="$TASK_INDEX" \
+  'NR > 1 && $1 == wanted {print; exit}' "$TASKS")"
+[[ -n "$row" ]] || {
+  echo "[ERROR] task row absent: $TASK_INDEX" >&2
+  exit 2
+}
+IFS=$'\t' read -r observed sample_index sample group shard input_bam \
+  reference_fasta contig_file cell_index contig_index output_dir MIN_MAPQ \
+  MIN_BASEQ EXCLUDE_READ_ENDS <<< "$row"
+[[ "$observed" == "$TASK_INDEX" ]] || {
+  echo "[ERROR] task row index mismatch: $observed != $TASK_INDEX" >&2
+  exit 2
+}
+for value in "$MIN_MAPQ" "$MIN_BASEQ" "$EXCLUDE_READ_ENDS"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] non-integer caller threshold in task $TASK_INDEX" >&2
+    exit 2
+  }
+done
+for path in "$input_bam" "$reference_fasta" "$reference_fasta.fai" \
+  "$contig_file" "$cell_index" "$contig_index"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+prefix="$sample.shard_$(printf '%02d' "$shard")"
+summary="$output_dir/$prefix.summary.tsv"
+if (( FORCE == 0 )) && [[ -s "$summary" ]] && \
+  awk -F '\t' -v bam="$input_bam" -v mq="$MIN_MAPQ" \
+    -v bq="$MIN_BASEQ" -v ends="$EXCLUDE_READ_ENDS" \
+    '$1 == "status" && $2 == "validated" {ok=1}
+     $1 == "input_bam" && $2 == bam {same=1}
+     $1 == "minimum_mapq" && $2 == mq {mapq=1}
+     $1 == "minimum_baseq" && $2 == bq {baseq=1}
+     $1 == "excluded_bases_each_read_end" && $2 == ends {trim=1}
+     END {exit !(ok && same && mapq && baseq && trim)}' "$summary"; then
+  echo "[SKIP] validated cytosine task: $TASK_INDEX $sample shard=$shard"
+  exit 0
+fi
+
+mkdir -p "$output_dir" \
+  "$PROJECT/09_logs/04_postmapping/single_cytosine/call"
+cd "$PROJECT"
+"$PYTHON_BIN" "$POST_DIR/05_dna_single_cytosine/65_call_dna_single_cytosine_task.py" \
+  --sample "$sample" \
+  --bam "$input_bam" \
+  --fasta "$reference_fasta" \
+  --contig-file "$contig_file" \
+  --cell-index "$cell_index" \
+  --contig-index "$contig_index" \
+  --shard "$shard" \
+  --out-dir "$output_dir" \
+  --samtools "$SAMTOOLS_BIN" \
+  --threads "$SAMTOOLS_THREADS" \
+  --min-mapq "$MIN_MAPQ" \
+  --min-baseq "$MIN_BASEQ" \
+  --exclude-read-ends "$EXCLUDE_READ_ENDS"
