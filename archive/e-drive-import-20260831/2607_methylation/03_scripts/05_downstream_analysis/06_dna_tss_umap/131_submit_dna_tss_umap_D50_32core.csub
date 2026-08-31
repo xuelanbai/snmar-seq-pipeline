@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Step 131: stricter shared-promoter TSS UMAP at whole-genome D50.
+#CSUB -J snMAR_TSS_UMAP_D50
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_tss_umap/umap_D50.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_tss_umap/umap_D50.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/06_dna_tss_umap/129_build_dna_tss_umap.py"
+SOURCE_SUMMARY="$PROJECT/08_qc_summary/38_dna_tss_promoters/dna_tss_complete_summary.tsv"
+THREADS="${THREADS:-32}"
+FORCE_TSS_UMAP="${FORCE_TSS_UMAP:-0}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, matplotlib, numpy, scipy, sklearn, umap' || {
+  echo "[ERROR] snTAPS_analysis lacks DNA TSS UMAP dependencies" >&2
+  exit 2
+}
+for path in "$SCRIPT" "$SOURCE_SUMMARY"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+[[ "$(awk -F '\t' '$1=="status"{print $2; exit}' "$SOURCE_SUMMARY")" == "validated" ]] || {
+  echo "[ERROR] complete TSS matrix is not validated" >&2
+  exit 2
+}
+
+export OMP_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_tss_umap"
+cd "$PROJECT"
+arguments=(
+  --project "$PROJECT"
+  --feature-space ortholog_single_gene
+  --min-total-calls 50000
+  --min-promoter-calls-per-context 25
+  --min-feature-cells 5
+  --min-feature-covered-calls 20
+  --max-features-per-context 20000
+  --svd-components 30
+  --neighbors 30
+  --min-dist 0.30
+  --minimum-major-fraction 0.90
+  --seed 2607
+  --threads "$THREADS"
+)
+if [[ "$FORCE_TSS_UMAP" == "1" ]]; then
+  arguments+=(--force)
+fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

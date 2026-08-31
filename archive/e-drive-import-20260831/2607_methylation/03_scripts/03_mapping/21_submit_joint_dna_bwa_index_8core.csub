@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Step 21: build a BWA index for the prefixed human+pig joint reference.
+#
+# BWA 0.7.x indexing is essentially single-threaded. Eight CPUs are requested
+# for node placement and validation utilities; the 32/64-CPU allocations are
+# reserved for the mapping jobs where they provide a real speedup.
+#
+#CSUB -J snMAR_DNA_BWAindex
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/21_dna_bwa_index.out
+#CSUB -e 09_logs/03_mapping/21_dna_bwa_index.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+DNA_ALIGN_ENV="${DNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$DNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+JOINT_FASTA="${JOINT_FASTA:-$PROJECT/02_reference/rna_human_pig_joint/human_pig.prefixed.fa}"
+INDEX_DIR="${DNA_BWA_INDEX_DIR:-$PROJECT/02_reference/dna_human_pig_bwa}"
+INDEX_PREFIX="${DNA_BWA_INDEX_PREFIX:-$INDEX_DIR/human_pig.prefixed}"
+DONE_FILE="$INDEX_DIR/.snmar_bwa_index_done.tsv"
+BWA_REQUESTED="${BWA:-bwa}"
+SAMTOOLS_REQUESTED="${SAMTOOLS:-samtools}"
+BWA_BIN="$(command -v "$BWA_REQUESTED" || true)"
+SAMTOOLS_BIN="$(command -v "$SAMTOOLS_REQUESTED" || true)"
+FORCE="${FORCE:-0}"
+
+[[ "$FORCE" =~ ^[01]$ ]] || {
+  echo "[ERROR] FORCE must be 0 or 1: $FORCE" >&2
+  exit 2
+}
+[[ -n "$BWA_BIN" && -x "$BWA_BIN" ]] || {
+  echo "[ERROR] BWA is unavailable in environment: $DNA_ALIGN_ENV" >&2
+  exit 127
+}
+[[ -n "$SAMTOOLS_BIN" && -x "$SAMTOOLS_BIN" ]] || {
+  echo "[ERROR] samtools is unavailable in environment: $DNA_ALIGN_ENV" >&2
+  exit 127
+}
+[[ -s "$JOINT_FASTA" ]] || {
+  echo "[ERROR] missing/empty joint FASTA: $JOINT_FASTA" >&2
+  echo "[ERROR] RNA mapping has already used this FASTA; check step 12 output." >&2
+  exit 2
+}
+
+cd "$PROJECT"
+mkdir -p "$INDEX_DIR" "$PROJECT/09_logs/03_mapping"
+
+required_suffixes=(amb ann bwt pac sa)
+index_complete=1
+for suffix in "${required_suffixes[@]}"; do
+  [[ -s "$INDEX_PREFIX.$suffix" ]] || index_complete=0
+done
+
+if (( index_complete == 1 && FORCE == 0 )); then
+  echo "[INFO] complete BWA index already exists; validating it"
+else
+  if (( index_complete == 1 && FORCE == 1 )); then
+    echo "[INFO] FORCE=1; rebuilding the BWA index in place"
+  else
+    echo "[INFO] building BWA index (bwtsw) from: $JOINT_FASTA"
+  fi
+  "$BWA_BIN" index -a bwtsw -p "$INDEX_PREFIX" "$JOINT_FASTA"
+fi
+
+for suffix in "${required_suffixes[@]}"; do
+  [[ -s "$INDEX_PREFIX.$suffix" ]] || {
+    echo "[ERROR] missing/empty index component: $INDEX_PREFIX.$suffix" >&2
+    exit 2
+  }
+done
+
+human_contigs="$("$SAMTOOLS_BIN" faidx "$JOINT_FASTA" 2>/dev/null; \
+  cut -f1 "$JOINT_FASTA.fai" | awk '/^human_/{n++} END{print n+0}')"
+pig_contigs="$(cut -f1 "$JOINT_FASTA.fai" | awk '/^pig_/{n++} END{print n+0}')"
+total_contigs="$(wc -l < "$JOINT_FASTA.fai")"
+(( human_contigs > 0 && pig_contigs > 0 )) || {
+  echo "[ERROR] joint FASTA does not contain both human_ and pig_ contigs" >&2
+  exit 2
+}
+
+bwa_help="$("$BWA_BIN" 2>&1 || true)"
+bwa_version="$(awk '/Version:/{print $2; exit}' <<< "$bwa_help")"
+samtools_version="$("$SAMTOOLS_BIN" --version | awk 'NR==1{print $2}')"
+tmp_done="$DONE_FILE.tmp.$$"
+{
+  printf 'metric\tvalue\n'
+  printf 'joint_fasta\t%s\n' "$JOINT_FASTA"
+  printf 'index_prefix\t%s\n' "$INDEX_PREFIX"
+  printf 'bwa_version\t%s\n' "${bwa_version:-unknown}"
+  printf 'samtools_version\t%s\n' "${samtools_version:-unknown}"
+  printf 'total_contigs\t%s\n' "$total_contigs"
+  printf 'human_contigs\t%s\n' "$human_contigs"
+  printf 'pig_contigs\t%s\n' "$pig_contigs"
+  printf 'completed_at\t%s\n' "$(date -Is)"
+} > "$tmp_done"
+mv -f "$tmp_done" "$DONE_FILE"
+
+echo "[OK] DNA BWA index is ready"
+echo "[OK] prefix: $INDEX_PREFIX"
+echo "[OK] contigs: total=$total_contigs human=$human_contigs pig=$pig_contigs"

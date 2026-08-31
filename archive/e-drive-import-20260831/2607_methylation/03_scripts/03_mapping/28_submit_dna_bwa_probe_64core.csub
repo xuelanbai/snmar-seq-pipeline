@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Step 28: map 8 representative DNA lanes, capped at 1M read pairs each.
+#
+# Two probe lanes run in parallel. Each lane performs BWA-MEM, coordinate
+# sorting, indexing, and strict BAM validation.
+#
+#CSUB -J snMAR_DNA_BWAprobe64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/28_dna_bwa_probe64.out
+#CSUB -e 09_logs/03_mapping/28_dna_bwa_probe64.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+DNA_ALIGN_ENV="${DNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$DNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="$PROJECT/03_scripts/03_mapping"
+INPUT_QC="${DNA_BWA_INPUT_QC_ROOT:-$PROJECT/08_qc_summary/10_dna_bwa_inputs}"
+PROBE_TABLE="$INPUT_QC/dna_bwa_probe.tsv"
+INDEX_PREFIX="${DNA_BWA_INDEX_PREFIX:-$PROJECT/02_reference/dna_human_pig_bwa/human_pig.prefixed}"
+INDEX_DIR="$(dirname "$INDEX_PREFIX")"
+OUTPUT_ROOT="${DNA_BWA_PROBE_ROOT:-$PROJECT/06_mapping/dna_bwa_joint_probe}"
+QC_ROOT="${DNA_BWA_PROBE_QC_ROOT:-$PROJECT/08_qc_summary/11_dna_bwa_probe}"
+TMP_ROOT="${DNA_BWA_PROBE_TMP_ROOT:-$PROJECT/06_mapping/dna_bwa_tmp_probe}"
+PARALLEL_RUNS="${PARALLEL_RUNS:-2}"
+FORCE="${FORCE:-0}"
+
+BWA_BIN="$(command -v "${BWA:-bwa}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+for name in BWA_BIN SAMTOOLS_BIN PYTHON_BIN; do
+  value="${!name}"
+  [[ -n "$value" && -x "$value" ]] || {
+    echo "[ERROR] unavailable executable: $name" >&2
+    exit 127
+  }
+done
+[[ "$PARALLEL_RUNS" =~ ^[0-9]+$ && "$FORCE" =~ ^[01]$ ]] || exit 2
+(( PARALLEL_RUNS >= 1 && PARALLEL_RUNS <= 2 )) || {
+  echo "[ERROR] PARALLEL_RUNS must be 1 or 2 for the 64-CPU allocation" >&2
+  exit 2
+}
+
+for path in \
+  "$PROBE_TABLE" \
+  "$MAPPING_DIR/23_prepare_dna_bwa_probe_fastq.py" \
+  "$MAPPING_DIR/24_validate_dna_bwa_bam.py" \
+  "$MAPPING_DIR/25_run_dna_bwa_one.sh" \
+  "$MAPPING_DIR/26_summarize_dna_bwa.py" \
+  "$INDEX_DIR/.snmar_bwa_index_done.tsv"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+for suffix in amb ann bwt pac sa; do
+  [[ -s "$INDEX_PREFIX.$suffix" ]] || exit 2
+done
+
+cd "$PROJECT"
+mkdir -p "$OUTPUT_ROOT" "$QC_ROOT/by_run" "$TMP_ROOT" \
+  "$PROJECT/09_logs/03_mapping"
+
+export BWA_BIN SAMTOOLS_BIN PYTHON_BIN INDEX_PREFIX MAPPING_DIR OUTPUT_ROOT QC_ROOT TMP_ROOT
+export FORCE
+export MODE=probe
+export BWA_THREADS="${BWA_THREADS:-24}"
+export COORD_SORT_THREADS="${COORD_SORT_THREADS:-6}"
+export VALIDATE_THREADS="${VALIDATE_THREADS:-2}"
+export SORT_MEMORY="${SORT_MEMORY:-1G}"
+
+run_probe() {
+  local run_id="$1"
+  local pair_id="$2"
+  local sample="$3"
+  local r1="$4"
+  local r2="$5"
+  local source_pairs="$6"
+  local expected_pairs="$7"
+  local probe_tmp="$TMP_ROOT/probe_fastq_${run_id}.$$"
+  mkdir -p "$probe_tmp"
+
+  "$PYTHON_BIN" "$MAPPING_DIR/23_prepare_dna_bwa_probe_fastq.py" \
+    --r1 "$r1" \
+    --r2 "$r2" \
+    --out-r1 "$probe_tmp/${run_id}.R1.fastq" \
+    --out-r2 "$probe_tmp/${run_id}.R2.fastq" \
+    --stats-out "$QC_ROOT/by_run/${run_id}.probe_fastq.json" \
+    --max-pairs "$expected_pairs" \
+    --expected-source-pairs "$source_pairs"
+
+  RUN_ID="$run_id" \
+  SAMPLE="$sample" \
+  R1_FILES="$probe_tmp/${run_id}.R1.fastq" \
+  R2_FILES="$probe_tmp/${run_id}.R2.fastq" \
+  EXPECTED_PAIRS="$expected_pairs" \
+  MAX_PAIRS="$expected_pairs" \
+    bash "$MAPPING_DIR/25_run_dna_bwa_one.sh"
+
+  rm -f "$probe_tmp/${run_id}.R1.fastq" "$probe_tmp/${run_id}.R2.fastq"
+  rmdir "$probe_tmp"
+  echo "[OK] probe completed: $run_id ($pair_id)"
+}
+export -f run_probe
+
+mapfile -t probe_rows < <(tail -n +2 "$PROBE_TABLE")
+(( ${#probe_rows[@]} == 8 )) || {
+  echo "[ERROR] expected 8 probe rows, found ${#probe_rows[@]}" >&2
+  exit 2
+}
+
+active=0
+failed=0
+for row in "${probe_rows[@]}"; do
+  IFS=$'\t' read -r probe_index run_id pair_id sample group r1 r2 \
+    source_pairs expected_pairs selection_reason <<< "$row"
+  run_probe "$run_id" "$pair_id" "$sample" "$r1" "$r2" \
+    "$source_pairs" "$expected_pairs" &
+  active=$((active + 1))
+  if (( active >= PARALLEL_RUNS )); then
+    wait -n || failed=1
+    active=$((active - 1))
+  fi
+done
+while (( active > 0 )); do
+  wait -n || failed=1
+  active=$((active - 1))
+done
+(( failed == 0 )) || {
+  echo "[ERROR] one or more DNA BWA probe runs failed" >&2
+  exit 1
+}
+
+"$PYTHON_BIN" "$MAPPING_DIR/26_summarize_dna_bwa.py" \
+  --mode probe \
+  --manifest "$PROBE_TABLE" \
+  --validation-root "$QC_ROOT/by_run" \
+  --summary-out "$QC_ROOT/dna_bwa_probe_summary.tsv" \
+  --per-run-out "$QC_ROOT/dna_bwa_probe_per_run.tsv" \
+  --expected-runs 8 \
+  --expected-total-pairs 8000000
+
+echo "[OK] DNA BWA probe is complete: $QC_ROOT"

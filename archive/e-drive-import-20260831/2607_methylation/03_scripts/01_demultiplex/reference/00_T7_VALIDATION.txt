@@ -1,0 +1,17 @@
+Validation source workbook:
+D:/Lucas临时文件/基因表达调控变异/snMAR/Truseq-T7-linker长度对应.xlsx
+
+Reference table:
+D:/Lucas临时文件/基因表达调控变异/snMAR/往期参考代码/snTAPS_methylation/03_scripts/split/index/T7
+
+Comparison result:
+- Current workbook contains T7-1 through T7-96: 96 rows.
+- All 96 barcode sequences exactly match the corresponding old T7 rows: 96/96.
+- Mismatches: 0.
+- Duplicate sequences in the current 96-row table: 0.
+- The old table additionally contains T7-97 through T7-384; these are not part of the current workbook and are excluded from the current whitelist.
+- Linker lengths in the current workbook:
+  - 22 bp: 24 rows
+  - 23 bp: 24 rows
+  - 24 bp: 24 rows
+  - 25 bp: 24 rows

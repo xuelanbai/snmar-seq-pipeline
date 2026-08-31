@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Step 05: submit a 64-core DNA XD=0 front-trim + fastp probe.
+#CSUB -J snMAR_DNAfastpProbe64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -o 09_logs/03_mapping/05_dna_fastp_probe64.out
+#CSUB -e 09_logs/03_mapping/05_dna_fastp_probe64.err
+
+set -euo pipefail
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="$PROJECT/03_scripts/03_mapping"
+SPLIT_ROOT="${DNA_SPLIT_ROOT:-$PROJECT/04_fastq_split/write_rescue}"
+PROBE_ROOT="$PROJECT/05_fastp/dna_probe"
+QC_ROOT="$PROJECT/08_qc_summary/03_dna_fastp_probe"
+LOG_ROOT="$PROJECT/09_logs/03_mapping/dna_fastp_probe_by_pair"
+FASTP="${FASTP:-fastp}"
+PYTHON="${PYTHON:-python3}"
+
+# 16 simultaneous pairs x 4 fastp threads = 64 requested CPU cores.
+export JOBS=64
+export PARALLEL_PAIRS="${PARALLEL_PAIRS:-16}"
+export FASTP_THREADS="${FASTP_THREADS:-4}"
+export PROBE_PAIRS="${PROBE_PAIRS:-16}"
+export MAX_INPUT_PAIRS="${MAX_INPUT_PAIRS:-200000}"
+export FORCE="${FORCE:-0}"
+
+PAIR_TABLE="$QC_ROOT/dna_pairs.tsv"
+PROBE_TABLE="$QC_ROOT/dna_probe_pairs.tsv"
+PREP_ROOT="$PROBE_ROOT/prepared"
+CLEAN_ROOT="$PROBE_ROOT/clean"
+STAT_ROOT="$QC_ROOT/prepare_stats"
+JSON_ROOT="$QC_ROOT/fastp_json"
+
+cd "$PROJECT"
+mkdir -p "$PROBE_ROOT" "$QC_ROOT" "$LOG_ROOT"
+
+command -v "$FASTP" >/dev/null 2>&1 || {
+  echo "[ERROR] fastp not found: $FASTP" >&2
+  exit 127
+}
+
+"$PYTHON" "$MAPPING_DIR/02_discover_dna_assigned_pairs.py" \
+  --split-root "$SPLIT_ROOT" \
+  --out "$PAIR_TABLE" \
+  --probe-out "$PROBE_TABLE" \
+  --probe-count "$PROBE_PAIRS" \
+  --expected-pairs 768
+
+run_one() {
+  local pair_id="$1"
+  local sample="$2"
+  local r1="$3"
+  local r2="$4"
+  local prep_dir="$PREP_ROOT/$sample"
+  local clean_dir="$CLEAN_ROOT/$sample"
+  local stat_dir="$STAT_ROOT/$sample"
+  local json_dir="$JSON_ROOT/$sample"
+  local prep_r1="$prep_dir/${pair_id}.XD0.fronttrim_R1.fq.gz"
+  local prep_r2="$prep_dir/${pair_id}.XD0.fronttrim_R2.fq.gz"
+  local clean_r1="$clean_dir/${pair_id}.clean_R1.fq.gz"
+  local clean_r2="$clean_dir/${pair_id}.clean_R2.fq.gz"
+  local stat="$stat_dir/${pair_id}.prepare.tsv"
+  local json="$json_dir/${pair_id}.fastp.json"
+  local html="$json_dir/${pair_id}.fastp.html"
+  local log="$LOG_ROOT/${pair_id}.log"
+
+  mkdir -p "$prep_dir" "$clean_dir" "$stat_dir" "$json_dir"
+  if [[ "$FORCE" -eq 0 && -s "$clean_r1" && -s "$clean_r2" && \
+        -s "$stat" && -s "$json" ]]; then
+    echo "[INFO] skip completed $pair_id"
+    return 0
+  fi
+
+  {
+    echo "[INFO] prepare $pair_id"
+    "$PYTHON" "$MAPPING_DIR/03_prepare_dna_xd0_front_trim.py" \
+      --pair-id "$pair_id" \
+      --sample "$sample" \
+      --r1 "$r1" \
+      --r2 "$r2" \
+      --out-r1 "$prep_r1" \
+      --out-r2 "$prep_r2" \
+      --stat "$stat" \
+      --trim-front-r1 30 \
+      --trim-front-r2 43 \
+      --max-input-pairs "$MAX_INPUT_PAIRS"
+
+    echo "[INFO] fastp $pair_id"
+    "$FASTP" \
+      --in1 "$prep_r1" \
+      --in2 "$prep_r2" \
+      --out1 "$clean_r1" \
+      --out2 "$clean_r2" \
+      --detect_adapter_for_pe \
+      --qualified_quality_phred 20 \
+      --unqualified_percent_limit 30 \
+      --length_required 30 \
+      --cut_front \
+      --cut_tail \
+      --cut_window_size 4 \
+      --cut_mean_quality 20 \
+      --trim_poly_g \
+      --poly_g_min_len 10 \
+      --dont_eval_duplication \
+      --thread "$FASTP_THREADS" \
+      --json "$json" \
+      --html "$html"
+    echo "[INFO] done $pair_id"
+  } >"$log" 2>&1
+}
+
+export -f run_one
+export PROJECT MAPPING_DIR PREP_ROOT CLEAN_ROOT STAT_ROOT JSON_ROOT LOG_ROOT
+export FASTP PYTHON FASTP_THREADS MAX_INPUT_PAIRS FORCE
+
+tail -n +2 "$PROBE_TABLE" |
+  while IFS=$'\t' read -r pair_id sample r1 r2; do
+    printf '%s\0%s\0%s\0%s\0' "$pair_id" "$sample" "$r1" "$r2"
+  done |
+  xargs -0 -P "$PARALLEL_PAIRS" -n 4 bash -c 'run_one "$@"' _
+
+"$PYTHON" "$MAPPING_DIR/04_summarize_dna_fastp_probe.py" \
+  --probe-table "$PROBE_TABLE" \
+  --stat-root "$STAT_ROOT" \
+  --clean-root "$CLEAN_ROOT" \
+  --json-root "$JSON_ROOT" \
+  --summary "$QC_ROOT/dna_fastp_probe_summary.tsv" \
+  --per-pair "$QC_ROOT/dna_fastp_probe_per_pair.tsv"
+
+echo "[INFO] DNA fastp probe complete"

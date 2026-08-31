@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Step 114 template: recount one balanced 24-file RNA shard in three modes.
+#CSUB -J snMAR_RNA_evidence___SHARD_INDEX__
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_expression_evidence/shard___SHARD_INDEX__.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_expression_evidence/shard___SHARD_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+MANIFEST="$PROJECT/08_qc_summary/14_postmapping_full_inputs/rna_reverse_genefull_full_manifest.tsv"
+GTF="${JOINT_GTF:-$PROJECT/02_reference/rna_human_pig_joint/human_pig.prefixed.gtf}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/05_rna_umap/113_recount_rna_expression_evidence_one.py"
+OUTPUT_ROOT="$PROJECT/10_downstream_analysis/05_rna_expression_evidence_audit/by_file"
+LOG_ROOT="$PROJECT/09_logs/05_downstream_analysis/rna_expression_evidence/by_file"
+SHARD_INDEX="__SHARD_INDEX__"
+PARALLEL_FILES="${PARALLEL_FILES:-8}"
+SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-4}"
+FORCE="${FORCE:-0}"
+
+[[ "$SHARD_INDEX" =~ ^[1-4]$ ]] || {
+  echo "[ERROR] unresolved or invalid SHARD_INDEX: $SHARD_INDEX" >&2
+  exit 2
+}
+for name in PARALLEL_FILES SAMTOOLS_THREADS FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+done
+(( PARALLEL_FILES >= 1 && SAMTOOLS_THREADS >= 1 && \
+  PARALLEL_FILES * SAMTOOLS_THREADS <= 32 && FORCE <= 1 )) || exit 2
+
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || {
+  echo "[ERROR] python or samtools is unavailable in snTAPS_align" >&2
+  exit 127
+}
+for path in "$MANIFEST" "$GTF" "$SCRIPT"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+shard_rows="$(awk -F '\t' -v shard="$SHARD_INDEX" \
+  'NR > 1 && $2 == shard {count++} END {print count+0}' "$MANIFEST")"
+(( shard_rows == 24 )) || {
+  echo "[ERROR] expected 24 files in shard $SHARD_INDEX, found $shard_rows" >&2
+  exit 2
+}
+
+cd "$PROJECT"
+mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT" \
+  "$PROJECT/09_logs/05_downstream_analysis/rna_expression_evidence"
+
+run_one() {
+  local manifest_index="$1"
+  local pair_id="$2"
+  local sample="$3"
+  local expected_input="$4"
+  local expected_primary="$5"
+  local bam="$6"
+  local out_dir="$OUTPUT_ROOT/$pair_id"
+  local summary="$out_dir/$pair_id.evidence_mode_summary.json"
+  local log="$LOG_ROOT/$pair_id.log"
+  if (( FORCE == 0 )) && [[ -s "$summary" ]] && \
+    "$PYTHON_BIN" -c \
+      'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); raise SystemExit(0 if p.get("status")=="validated" and p.get("pipeline_signature")=="snmar_rna_expression_evidence_recount_20260806" else 1)' \
+      "$summary"
+  then
+    echo "[INFO] existing validated evidence recount; skipping: $pair_id"
+    return 0
+  fi
+  mkdir -p "$out_dir"
+  "$PYTHON_BIN" "$SCRIPT" \
+    --bam "$bam" \
+    --gtf "$GTF" \
+    --pair-id "$pair_id" \
+    --sample "$sample" \
+    --manifest-index "$manifest_index" \
+    --shard "$SHARD_INDEX" \
+    --expected-input-reads "$expected_input" \
+    --expected-primary-mapped "$expected_primary" \
+    --out-dir "$out_dir" \
+    --samtools "$SAMTOOLS_BIN" \
+    --threads "$SAMTOOLS_THREADS" \
+    > "$log" 2>&1
+}
+export -f run_one
+export PYTHON_BIN SAMTOOLS_BIN SCRIPT GTF OUTPUT_ROOT LOG_ROOT
+export SHARD_INDEX SAMTOOLS_THREADS FORCE
+
+awk -F '\t' -v shard="$SHARD_INDEX" \
+  'NR > 1 && $2 == shard {print $1, $4, $5, $6, $7, $9}' "$MANIFEST" |
+  xargs -r -P "$PARALLEL_FILES" -n 6 bash -c \
+    'run_one "$1" "$2" "$3" "$4" "$5" "$6"' _
+
+echo "[OK] RNA expression-evidence shard completed: $SHARD_INDEX"

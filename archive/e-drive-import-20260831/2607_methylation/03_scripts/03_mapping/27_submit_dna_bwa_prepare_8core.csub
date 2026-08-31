@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Step 27: validate all DNA clean FASTQs and create deterministic BWA manifests.
+#
+#CSUB -J snMAR_DNA_BWAprepare
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/27_dna_bwa_prepare.out
+#CSUB -e 09_logs/03_mapping/27_dna_bwa_prepare.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+DNA_ALIGN_ENV="${DNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$DNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="$PROJECT/03_scripts/03_mapping"
+FASTP_QC="${DNA_FASTP_QC_ROOT:-$PROJECT/08_qc_summary/04_dna_fastp_full}"
+FASTP_PER_PAIR="$FASTP_QC/dna_fastp_full_per_pair.tsv"
+CLEAN_ROOT="${DNA_CLEAN_ROOT:-$PROJECT/05_fastp/dna_strict}"
+QC_ROOT="${DNA_BWA_INPUT_QC_ROOT:-$PROJECT/08_qc_summary/10_dna_bwa_inputs}"
+PYTHON_REQUESTED="${PYTHON:-python}"
+PYTHON_BIN="$(command -v "$PYTHON_REQUESTED" || true)"
+
+[[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] Python is unavailable in environment: $DNA_ALIGN_ENV" >&2
+  exit 127
+}
+for path in "$FASTP_PER_PAIR" "$MAPPING_DIR/22_discover_dna_bwa_inputs.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+cd "$PROJECT"
+mkdir -p "$QC_ROOT" "$PROJECT/09_logs/03_mapping"
+"$PYTHON_BIN" "$MAPPING_DIR/22_discover_dna_bwa_inputs.py" \
+  --fastp-per-pair "$FASTP_PER_PAIR" \
+  --clean-root "$CLEAN_ROOT" \
+  --pair-out "$QC_ROOT/dna_bwa_pairs.tsv" \
+  --sample-out "$QC_ROOT/dna_bwa_samples.tsv" \
+  --probe-out "$QC_ROOT/dna_bwa_probe.tsv" \
+  --expected-pairs-files 768 \
+  --expected-samples 96 \
+  --expected-lanes-per-sample 8 \
+  --expected-total-clean-pairs 16947758776 \
+  --probe-files-per-group 4 \
+  --probe-read-pairs 1000000
+
+echo "[OK] DNA BWA input manifests are ready: $QC_ROOT"

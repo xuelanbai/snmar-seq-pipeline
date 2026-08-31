@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Step 102: summarize all 96 RNA species/residual audit results.
+#CSUB -J snMAR_RNA_species_audit_summary
+#CSUB -q c02
+#CSUB -n 4
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_species_residual_audit/summary.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_species_residual_audit/summary.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/03_cell_qc_filtering/101_summarize_rna_species_residual_audit.py"
+AUDIT_ROOT="$PROJECT/08_qc_summary/31_rna_species_residual_audit/by_file"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+completed="$(find "$AUDIT_ROOT" -maxdepth 1 -type f \
+  -name '*.rna_species_alignment_audit.tsv' -size +0c 2>/dev/null | wc -l)"
+(( completed == 96 )) || {
+  echo "[ERROR] expected 96 alignment audit files, found $completed" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/rna_species_residual_audit"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --expected-wells "${EXPECTED_WELLS:-96}" \
+  --human-only-wells "${HUMAN_ONLY_WELLS:-48}"

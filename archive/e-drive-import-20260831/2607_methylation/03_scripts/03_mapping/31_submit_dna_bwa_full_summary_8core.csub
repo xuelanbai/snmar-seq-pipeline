@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Step 31: validate completeness and summarize all 96 full DNA BWA samples.
+#
+# Submit only after the step-30 mapping jobs have finished. If any sample is
+# missing, this job exits nonzero and lists the missing validation JSON files.
+#
+#CSUB -J snMAR_DNA_BWAsummary
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/31_dna_bwa_full_summary.out
+#CSUB -e 09_logs/03_mapping/31_dna_bwa_full_summary.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+DNA_ALIGN_ENV="${DNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$DNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="$PROJECT/03_scripts/03_mapping"
+INPUT_QC="${DNA_BWA_INPUT_QC_ROOT:-$PROJECT/08_qc_summary/10_dna_bwa_inputs}"
+SAMPLE_TABLE="$INPUT_QC/dna_bwa_samples.tsv"
+QC_ROOT="${DNA_BWA_FULL_QC_ROOT:-$PROJECT/08_qc_summary/12_dna_bwa_full}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || exit 127
+for path in "$SAMPLE_TABLE" "$MAPPING_DIR/26_summarize_dna_bwa.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+cd "$PROJECT"
+mkdir -p "$QC_ROOT" "$PROJECT/09_logs/03_mapping"
+
+"$PYTHON_BIN" "$MAPPING_DIR/26_summarize_dna_bwa.py" \
+  --mode full \
+  --manifest "$SAMPLE_TABLE" \
+  --validation-root "$QC_ROOT/by_run" \
+  --summary-out "$QC_ROOT/dna_bwa_full_summary.tsv" \
+  --per-run-out "$QC_ROOT/dna_bwa_full_per_sample.tsv" \
+  --expected-runs 96 \
+  --expected-total-pairs 16947758776
+
+echo "[OK] all 96 full DNA BWA samples are validated and summarized"

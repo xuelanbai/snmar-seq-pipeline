@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Step 09: submit the 64-core RNA strict-10bp-I7 statistics job.
+#CSUB -J snMAR_RNAstrict10Stat64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -o 09_logs/02_rna_demultiplex/09_full_strict10_64.out
+#CSUB -e 09_logs/02_rna_demultiplex/09_full_strict10_64.err
+
+set -euo pipefail
+
+PROJECT=/share/org/YZWL/yzwl_wujx/Projects/2607_methylation
+cd "$PROJECT"
+mkdir -p 09_logs/02_rna_demultiplex
+
+export PROJECT
+export JOBS=64
+export FORCE="${FORCE:-0}"
+
+bash 03_scripts/02_rna_demultiplex/06_run_rna_demultiplex.sh full-strict10

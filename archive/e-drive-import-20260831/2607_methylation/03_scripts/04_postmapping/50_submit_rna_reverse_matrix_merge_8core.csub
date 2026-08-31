@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Step 50: validate 96 RNA outputs and create the raw sparse matrix.
+#
+#CSUB -J snMAR_RNA_matrix_merge
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/50_rna_matrix_merge.out
+#CSUB -e 09_logs/04_postmapping/50_rna_matrix_merge.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="$PROJECT/03_scripts/04_postmapping"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+[[ -s "$POST_DIR/49_merge_rna_reverse_genefull_matrix.py" ]] || exit 2
+
+cd "$PROJECT"
+mkdir -p "$PROJECT/09_logs/04_postmapping"
+"$PYTHON_BIN" "$POST_DIR/49_merge_rna_reverse_genefull_matrix.py" \
+  --project "$PROJECT"
+

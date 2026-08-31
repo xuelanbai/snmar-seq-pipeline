@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Step 59: validate/summarize all 96 full DNA TAPS outputs.
+#
+#CSUB -J snMAR_DNA_TAPS_summary
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/59_dna_taps_cpg_full_summary.out
+#CSUB -e 09_logs/04_postmapping/59_dna_taps_cpg_full_summary.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="$PROJECT/03_scripts/04_postmapping"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$PYTHON_BIN" ]] || exit 127
+[[ -s "$POST_DIR/58_summarize_dna_taps_cpg_full.py" ]] || exit 2
+
+cd "$PROJECT"
+mkdir -p "$PROJECT/09_logs/04_postmapping"
+"$PYTHON_BIN" "$POST_DIR/58_summarize_dna_taps_cpg_full.py" \
+  --project "$PROJECT"

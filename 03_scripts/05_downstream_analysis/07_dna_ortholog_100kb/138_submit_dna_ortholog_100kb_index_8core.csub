@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Step 138: build reciprocal-best shared 100 kb axes and bilateral WCG QC.
+#CSUB -J snMAR_o100_index
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_ortholog_100kb/index.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_ortholog_100kb/index.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/07_dna_ortholog_100kb/135_prepare_dna_ortholog_100kb_index.py"
+REFERENCE_ROOT="$PROJECT/02_reference/human_pig_synteny"
+CHAIN="${HUMAN_PIG_RBEST_CHAIN:-$REFERENCE_ROOT/hg38.susScr11.rbest.chain.gz}"
+CHAIN_URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/vsSusScr11/reciprocalBest/hg38.susScr11.rbest.chain.gz"
+HUMAN_FASTA="${HUMAN_FASTA:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_project/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa}"
+PIG_FASTA="${PIG_FASTA:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_pig/reference/Sus_scrofa.Sscrofa11.1.dna.toplevel.fa}"
+AUTO_DOWNLOAD_CHAIN="${AUTO_DOWNLOAD_CHAIN:-0}"
+FORCE_ORTHO_INDEX="${FORCE_ORTHO_INDEX:-0}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+
+[[ "$AUTO_DOWNLOAD_CHAIN" =~ ^[01]$ ]] || exit 2
+[[ "$FORCE_ORTHO_INDEX" =~ ^[01]$ ]] || exit 2
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || exit 127
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+mkdir -p "$REFERENCE_ROOT" "$PROJECT/09_logs/05_downstream_analysis/dna_ortholog_100kb"
+if [[ ! -s "$CHAIN" ]]; then
+  if [[ "$AUTO_DOWNLOAD_CHAIN" != "1" ]]; then
+    echo "[ERROR] missing reciprocal-best chain: $CHAIN" >&2
+    echo "[HINT] rerun with AUTO_DOWNLOAD_CHAIN=1 or download: $CHAIN_URL" >&2
+    exit 2
+  fi
+  CURL_BIN="$(command -v curl || true)"
+  [[ -x "$CURL_BIN" ]] || {
+    echo "[ERROR] curl is unavailable; download $CHAIN_URL manually" >&2
+    exit 127
+  }
+  temporary="$CHAIN.download"
+  "$CURL_BIN" -L --fail --retry 3 -C - -o "$temporary" "$CHAIN_URL"
+  mv "$temporary" "$CHAIN"
+fi
+for path in "$CHAIN" "$HUMAN_FASTA" "$HUMAN_FASTA.fai" "$PIG_FASTA" "$PIG_FASTA.fai"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+cd "$PROJECT"
+arguments=(
+  --project "$PROJECT"
+  --chain "$CHAIN"
+  --human-fasta "$HUMAN_FASTA"
+  --pig-fasta "$PIG_FASTA"
+  --samtools "$SAMTOOLS_BIN"
+  --bin-size 100000
+  --min-aligned-fraction 0.80
+  --min-span-ratio 0.70
+  --max-span-ratio 1.30
+  --min-reference-wcg 20
+)
+if [[ "$FORCE_ORTHO_INDEX" == "1" ]]; then
+  arguments+=(--force)
+fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

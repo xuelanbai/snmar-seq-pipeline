@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Step 99 template: audit one balanced 24-file RNA alignment shard.
+#CSUB -J snMAR_RNA_species_audit___SHARD_INDEX__
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_species_residual_audit/shard___SHARD_INDEX__.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_species_residual_audit/shard___SHARD_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+MANIFEST="$PROJECT/08_qc_summary/14_postmapping_full_inputs/rna_reverse_genefull_full_manifest.tsv"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/03_cell_qc_filtering/98_audit_rna_species_alignment_one.py"
+OUTPUT_ROOT="$PROJECT/08_qc_summary/31_rna_species_residual_audit/by_file"
+LOG_ROOT="$PROJECT/09_logs/05_downstream_analysis/rna_species_residual_audit/by_file"
+SHARD_INDEX="__SHARD_INDEX__"
+PARALLEL_FILES="${PARALLEL_FILES:-8}"
+SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-2}"
+HUMAN_ONLY_WELLS="${HUMAN_ONLY_WELLS:-48}"
+FORCE="${FORCE:-0}"
+
+[[ "$SHARD_INDEX" =~ ^[1-4]$ ]] || {
+  echo "[ERROR] unresolved or invalid SHARD_INDEX: $SHARD_INDEX" >&2
+  exit 2
+}
+for name in PARALLEL_FILES SAMTOOLS_THREADS HUMAN_ONLY_WELLS FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+done
+(( PARALLEL_FILES >= 1 && SAMTOOLS_THREADS >= 1 && \
+  PARALLEL_FILES * SAMTOOLS_THREADS <= 32 && \
+  HUMAN_ONLY_WELLS >= 1 && FORCE <= 1 )) || exit 2
+
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || exit 127
+for path in "$MANIFEST" "$SCRIPT"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+shard_rows="$(awk -F '\t' -v shard="$SHARD_INDEX" \
+  'NR > 1 && $2 == shard {count++} END {print count+0}' "$MANIFEST")"
+(( shard_rows == 24 )) || {
+  echo "[ERROR] expected 24 files in shard $SHARD_INDEX, found $shard_rows" >&2
+  exit 2
+}
+
+cd "$PROJECT"
+mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT" \
+  "$PROJECT/09_logs/05_downstream_analysis/rna_species_residual_audit"
+
+run_one() {
+  local manifest_index="$1"
+  local pair_id="$2"
+  local sample="$3"
+  local expected_primary="$4"
+  local bam="$5"
+  local output="$OUTPUT_ROOT/$pair_id.rna_species_alignment_audit.tsv"
+  local log="$LOG_ROOT/$pair_id.log"
+  if (( FORCE == 0 )) && [[ -s "$output" ]] && \
+    awk -F '\t' 'NR==2 && $1=="validated" {ok=1} END{exit !ok}' "$output"; then
+    echo "[INFO] existing validated audit; skipping: $pair_id"
+    return 0
+  fi
+  "$PYTHON_BIN" "$SCRIPT" \
+    --bam "$bam" \
+    --pair-id "$pair_id" \
+    --sample "$sample" \
+    --manifest-index "$manifest_index" \
+    --shard "$SHARD_INDEX" \
+    --expected-primary-mapped "$expected_primary" \
+    --output "$output" \
+    --samtools "$SAMTOOLS_BIN" \
+    --threads "$SAMTOOLS_THREADS" \
+    --human-only-wells "$HUMAN_ONLY_WELLS" \
+    > "$log" 2>&1
+}
+export -f run_one
+export PYTHON_BIN SAMTOOLS_BIN SCRIPT OUTPUT_ROOT LOG_ROOT
+export SHARD_INDEX SAMTOOLS_THREADS HUMAN_ONLY_WELLS FORCE
+
+awk -F '\t' -v shard="$SHARD_INDEX" \
+  'NR > 1 && $2 == shard {print $1, $4, $5, $7, $9}' "$MANIFEST" |
+  xargs -r -P "$PARALLEL_FILES" -n 5 bash -c \
+    'run_one "$1" "$2" "$3" "$4" "$5"' _
+
+echo "[OK] RNA species alignment audit shard completed: $SHARD_INDEX"

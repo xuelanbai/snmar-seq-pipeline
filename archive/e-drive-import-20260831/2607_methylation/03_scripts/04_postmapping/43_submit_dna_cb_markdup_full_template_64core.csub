@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Step 43 template: one full DNA sample per 64-CPU CB-aware dedup job.
+#
+#CSUB -J snMAR_DNA_CBdupF___SAMPLE_INDEX__
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/dna_cb_markdup_full/sample___SAMPLE_INDEX__.out
+#CSUB -e 09_logs/04_postmapping/dna_cb_markdup_full/sample___SAMPLE_INDEX__.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="$PROJECT/03_scripts/04_postmapping"
+MANIFEST="$PROJECT/08_qc_summary/14_postmapping_full_inputs/dna_cb_markdup_full_manifest.tsv"
+OUTPUT_ROOT="$PROJECT/07_postmapping/dna_cb_dedup_full"
+QC_ROOT="$PROJECT/08_qc_summary/15_dna_cb_markdup_full"
+TMP_ROOT="${DNA_CB_MARKDUP_FULL_TMP_ROOT:-$PROJECT/07_postmapping/tmp_dna_cb_markdup_full}"
+SAMPLE_INDEX="__SAMPLE_INDEX__"
+FORCE="${FORCE:-0}"
+
+[[ "$SAMPLE_INDEX" =~ ^[0-9]+$ ]] || {
+  echo "[ERROR] unresolved SAMPLE_INDEX: $SAMPLE_INDEX" >&2
+  exit 2
+}
+(( SAMPLE_INDEX >= 1 && SAMPLE_INDEX <= 96 )) || exit 2
+[[ -s "$MANIFEST" && -s "$POST_DIR/35_run_dna_cb_markdup_one.sh" ]] || exit 2
+
+row="$(awk -F '\t' -v wanted="$SAMPLE_INDEX" \
+  'NR > 1 && $1 == wanted {print; exit}' "$MANIFEST")"
+[[ -n "$row" ]] || {
+  echo "[ERROR] no DNA full manifest row: $SAMPLE_INDEX" >&2
+  exit 2
+}
+IFS=$'\t' read -r observed run_id sample group input_primary \
+  input_bytes input_bam <<< "$row"
+[[ "$observed" == "$SAMPLE_INDEX" && "$run_id" == "$sample" ]] || exit 2
+
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+[[ -x "$SAMTOOLS_BIN" && -x "$PYTHON_BIN" ]] || exit 127
+
+cd "$PROJECT"
+mkdir -p "$QC_ROOT/by_run" "$OUTPUT_ROOT" "$TMP_ROOT" \
+  "$PROJECT/09_logs/04_postmapping/dna_cb_markdup_full"
+
+export PROJECT POST_DIR OUTPUT_ROOT QC_ROOT TMP_ROOT
+export SAMTOOLS_BIN PYTHON_BIN FORCE
+export NAME_SORT_THREADS="${NAME_SORT_THREADS:-20}"
+export FIXMATE_THREADS="${FIXMATE_THREADS:-4}"
+export COORD_SORT_THREADS="${COORD_SORT_THREADS:-32}"
+export MARKDUP_THREADS="${MARKDUP_THREADS:-12}"
+export FILTER_THREADS="${FILTER_THREADS:-8}"
+export NAME_SORT_MEMORY="${NAME_SORT_MEMORY:-1G}"
+export COORD_SORT_MEMORY="${COORD_SORT_MEMORY:-1G}"
+# Full jobs keep only the filtered BAM to avoid duplicating terabytes of data.
+export KEEP_MARKED_BAM="${KEEP_MARKED_BAM:-0}"
+
+bash "$POST_DIR/35_run_dna_cb_markdup_one.sh" "$run_id" "$input_bam"

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Step 95: audit exact CB-sequence overlap across 96 physical wells.
+#CSUB -J snMAR_CB_overlap
+#CSUB -q c02
+#CSUB -n 4
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/cb_overlap_96wells.out
+#CSUB -e 09_logs/05_downstream_analysis/cb_overlap_96wells.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/02_cross_well_summary/94_audit_cb_overlap_96wells.py"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" --project "$PROJECT"
