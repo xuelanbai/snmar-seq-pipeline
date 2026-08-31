@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Step 11: submit the 32-core exact-split job.
+#CSUB -J snMAR_split32
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -o 09_logs/01_demultiplex/11_split_exact32.out
+#CSUB -e 09_logs/01_demultiplex/11_split_exact32.err
+
+set -euo pipefail
+
+PROJECT=/share/org/YZWL/yzwl_wujx/Projects/2607_methylation
+cd "$PROJECT"
+
+mkdir -p 09_logs/01_demultiplex
+
+export PROJECT
+export JOBS=32
+
+bash 03_scripts/01_demultiplex/06_run_demultiplex.sh write-exact

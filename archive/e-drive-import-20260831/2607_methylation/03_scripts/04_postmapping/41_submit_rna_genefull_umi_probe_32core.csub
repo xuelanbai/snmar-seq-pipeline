@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Step 41: eight-file RNA GeneFull/UMI Probe.
+#
+#CSUB -J snMAR_RNA_GeneFull_probe32
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/41_rna_genefull_probe32.out
+#CSUB -e 09_logs/04_postmapping/41_rna_genefull_probe32.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+conda activate "${RNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="$PROJECT/03_scripts/04_postmapping"
+MANIFEST="$PROJECT/08_qc_summary/13_postmapping_probe/rna_genefull_probe_manifest.tsv"
+JOINT_GTF="${JOINT_GTF:-$PROJECT/02_reference/rna_human_pig_joint/human_pig.prefixed.gtf}"
+RESULT_ROOT="$PROJECT/07_postmapping/rna_genefull_probe"
+QC_ROOT="$PROJECT/08_qc_summary/13_postmapping_probe/rna_genefull"
+LOG_ROOT="$PROJECT/09_logs/04_postmapping/rna_genefull_probe"
+PARALLEL_FILES="${PARALLEL_FILES:-8}"
+SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-2}"
+FORCE="${FORCE:-0}"
+
+for name in PARALLEL_FILES SAMTOOLS_THREADS FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+done
+(( PARALLEL_FILES >= 1 && SAMTOOLS_THREADS >= 1 && \
+  PARALLEL_FILES * SAMTOOLS_THREADS <= 32 && FORCE <= 1 )) || exit 2
+
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SAMTOOLS_BIN="$(command -v "${SAMTOOLS:-samtools}" || true)"
+[[ -x "$PYTHON_BIN" && -x "$SAMTOOLS_BIN" ]] || exit 127
+for path in "$MANIFEST" "$JOINT_GTF" \
+  "$POST_DIR/39_count_rna_genefull_umi_probe.py" \
+  "$POST_DIR/40_summarize_rna_genefull_umi_probe.py"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+rows=$(( $(wc -l < "$MANIFEST") - 1 ))
+(( rows == 8 )) || {
+  echo "[ERROR] expected eight RNA Probe manifest rows, found $rows" >&2
+  exit 2
+}
+
+cd "$PROJECT"
+mkdir -p "$RESULT_ROOT" "$QC_ROOT" "$LOG_ROOT"
+
+run_one() {
+  local pair_id="$1"
+  local sample="$2"
+  local bam="$3"
+  local out_dir="$RESULT_ROOT/$pair_id"
+  local summary="$out_dir/$pair_id.summary.json"
+  local log="$LOG_ROOT/$pair_id.log"
+  mkdir -p "$out_dir"
+  if (( FORCE == 0 )) && [[ -s "$summary" ]]; then
+    echo "[INFO] existing RNA Probe result; skipping: $pair_id"
+    return 0
+  fi
+  "$PYTHON_BIN" "$POST_DIR/39_count_rna_genefull_umi_probe.py" \
+    --bam "$bam" \
+    --gtf "$JOINT_GTF" \
+    --sample "$sample" \
+    --pair-id "$pair_id" \
+    --out-dir "$out_dir" \
+    --threads "$SAMTOOLS_THREADS" \
+    --samtools "$SAMTOOLS_BIN" \
+    > "$log" 2>&1
+}
+export -f run_one
+export PROJECT POST_DIR JOINT_GTF RESULT_ROOT LOG_ROOT
+export PYTHON_BIN SAMTOOLS_BIN SAMTOOLS_THREADS FORCE
+
+tail -n +2 "$MANIFEST" |
+  cut -f2,3,9 |
+  xargs -r -P "$PARALLEL_FILES" -n 3 bash -c \
+    'run_one "$1" "$2" "$3"' _
+
+"$PYTHON_BIN" "$POST_DIR/40_summarize_rna_genefull_umi_probe.py" \
+  --project "$PROJECT" \
+  --manifest "$MANIFEST" \
+  --result-root "$RESULT_ROOT" \
+  --qc-root "$QC_ROOT"
+
+echo "[OK] RNA GeneFull/UMI Probe completed"

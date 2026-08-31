@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Step 110: audit D50 DNA UMAP against confirmed GM12878/PK15 cell lines.
+#CSUB -J snMAR_DNA_GM_PK_audit
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_100kb_umap/cell_line_audit.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_100kb_umap/cell_line_audit.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/04_dna_umap/109_audit_dna_GM12878_PK15_umap.py"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+"$PYTHON_BIN" -c 'import matplotlib, numpy, sklearn' || {
+  echo "[ERROR] snTAPS_analysis lacks DNA UMAP audit dependencies" >&2
+  exit 2
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_100kb_umap"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --threshold D_total_50k \
+  --minimum-major-fraction 0.90 \
+  --neighbors 30

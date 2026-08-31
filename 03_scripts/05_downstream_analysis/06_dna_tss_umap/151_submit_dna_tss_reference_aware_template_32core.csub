@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Step 151: rendered template for one reference-aware promoter UMAP.
+# Human and pig promoters remain separate axes, matching the old human-bin +
+# pig-bin 100 kb design. Submit only through step 152.
+#CSUB -J snMAR_TSS_REF___DEPTH_TAG__
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_tss_umap/reference_aware/__DEPTH_TAG__.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_tss_umap/reference_aware/__DEPTH_TAG__.err
+
+set -euo pipefail
+
+MIN_TOTAL_CALLS="__MIN_TOTAL_CALLS__"
+DEPTH_TAG="__DEPTH_TAG__"
+FORCE_TSS_REFERENCE_AWARE="__FORCE__"
+
+case "$MIN_TOTAL_CALLS $DEPTH_TAG $FORCE_TSS_REFERENCE_AWARE" in
+  *"__"*)
+    echo "[ERROR] step 151 is an unrendered template; submit through step 152" >&2
+    exit 2
+    ;;
+esac
+[[ "$MIN_TOTAL_CALLS" =~ ^[0-9]+$ ]] || exit 2
+[[ "$FORCE_TSS_REFERENCE_AWARE" =~ ^[01]$ ]] || exit 2
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/06_dna_tss_umap/129_build_dna_tss_umap.py"
+SOURCE_SUMMARY="$PROJECT/08_qc_summary/38_dna_tss_promoters/dna_tss_complete_summary.tsv"
+THREADS="${THREADS:-32}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, matplotlib, numpy, scipy, sklearn, umap' || {
+  echo "[ERROR] snTAPS_analysis lacks DNA TSS UMAP dependencies" >&2
+  exit 2
+}
+for path in "$SCRIPT" "$SOURCE_SUMMARY"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+[[ "$(awk -F '\t' '$1=="status"{print $2; exit}' "$SOURCE_SUMMARY")" == "validated" ]] || {
+  echo "[ERROR] run and validate step 128 first" >&2
+  exit 2
+}
+
+export OMP_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_tss_umap/reference_aware"
+cd "$PROJECT"
+arguments=(
+  --project "$PROJECT"
+  --feature-space promoter_cluster
+  --min-total-calls "$MIN_TOTAL_CALLS"
+  --min-promoter-calls-per-context 25
+  --min-feature-cells 5
+  --min-feature-covered-calls 20
+  --max-features-per-context 20000
+  --svd-components 30
+  --neighbors 30
+  --min-dist 0.30
+  --minimum-major-fraction 0.90
+  --seed 2607
+  --threads "$THREADS"
+  --run-tag reference_aware
+  --drop-empty-selected-feature-cells
+  --max-empty-selected-feature-cell-fraction 0.01
+)
+if [[ "$FORCE_TSS_REFERENCE_AWARE" == "1" ]]; then
+  arguments+=(--force)
+fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

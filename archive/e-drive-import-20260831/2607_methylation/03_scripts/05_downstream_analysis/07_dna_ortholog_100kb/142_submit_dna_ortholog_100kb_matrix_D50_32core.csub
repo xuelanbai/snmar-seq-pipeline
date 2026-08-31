@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Step 142: export D50 shared-orthobin WCG matrices for Seurat.
+#CSUB -J snMAR_o100_D50
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_ortholog_100kb/matrix_D50.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_ortholog_100kb/matrix_D50.err
+
+set -euo pipefail
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/07_dna_ortholog_100kb/140_export_dna_ortholog_100kb_seurat_matrices.py"
+WELL_QC="$PROJECT/08_qc_summary/40_dna_ortholog_100kb/well_matrices"
+FORCE_ORTHO_MATRIX="${FORCE_ORTHO_MATRIX:-0}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, numpy, scipy' || {
+  echo "[ERROR] snTAPS_analysis lacks h5py, numpy or scipy" >&2
+  exit 2
+}
+[[ -s "$SCRIPT" ]] || exit 2
+completed="$(find "$WELL_QC" -maxdepth 1 -type f -name '*.dna_ortholog_100kb.summary.tsv' -size +0c 2>/dev/null | wc -l)"
+(( completed == 96 )) || {
+  echo "[ERROR] expected 96 orthobin well summaries, found $completed" >&2
+  exit 2
+}
+export OMP_NUM_THREADS=32 OPENBLAS_NUM_THREADS=32 MKL_NUM_THREADS=32
+cd "$PROJECT"
+arguments=(
+  --project "$PROJECT" --min-total-calls 50000
+  --min-orthobin-wcg-calls 100 --min-cell-bin-calls 5
+  --min-feature-cells 20 --min-feature-covered-calls 100
+  --min-feature-side-cells 2 --min-feature-side-covered-calls 20
+  --max-features 2000 --prior-strength 20 --minimum-major-fraction 0.90
+)
+if [[ "$FORCE_ORTHO_MATRIX" == "1" ]]; then arguments+=(--force); fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

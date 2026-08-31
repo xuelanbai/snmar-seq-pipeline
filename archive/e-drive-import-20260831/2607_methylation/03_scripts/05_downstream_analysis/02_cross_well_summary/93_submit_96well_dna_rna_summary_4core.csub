@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Step 93: summarize one sample across 96 wells, pooled by species.
+#CSUB -J snMAR_96well_summary
+#CSUB -q c02
+#CSUB -n 4
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/cross_well_summary.out
+#CSUB -e 09_logs/05_downstream_analysis/cross_well_summary.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+APPROX_NUCLEI_PER_WELL="${APPROX_NUCLEI_PER_WELL:-40}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/02_cross_well_summary/92_summarize_96well_dna_rna.py"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ "$APPROX_NUCLEI_PER_WELL" =~ ^[0-9]+$ ]] && \
+  (( APPROX_NUCLEI_PER_WELL >= 1 )) || {
+    echo "[ERROR] APPROX_NUCLEI_PER_WELL must be a positive integer" >&2
+    exit 2
+  }
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --approx-nuclei-per-well "$APPROX_NUCLEI_PER_WELL"

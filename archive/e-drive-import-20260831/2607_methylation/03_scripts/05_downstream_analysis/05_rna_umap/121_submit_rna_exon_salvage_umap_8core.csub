@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Step 121: exploratory UMAP for the exon-supported low-depth RNA matrix.
+#CSUB -J snMAR_RNA_exon_UMAP
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_exon_salvage/umap.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_exon_salvage/umap.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/05_rna_umap/120_build_rna_exon_salvage_umap.py"
+MATRIX_SUMMARY="$PROJECT/08_qc_summary/36_rna_exon_salvage_matrix/rna_exon_salvage_matrix_summary.tsv"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, matplotlib, numpy, scipy, sklearn, umap' || {
+  echo "[ERROR] snTAPS_analysis lacks RNA UMAP dependencies" >&2
+  exit 2
+}
+for path in "$SCRIPT" "$MATRIX_SUMMARY"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+[[ "$(awk -F '\t' '$1=="status"{print $2; exit}' "$MATRIX_SUMMARY")" == "validated" ]] || {
+  echo "[ERROR] exon salvage matrix is not validated" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/rna_exon_salvage"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --features-per-species 1000 \
+  --neighbors 15 \
+  --min-dist 0.30

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Step 119: package the full exon-supported RNA salvage matrix.
+#CSUB -J snMAR_RNA_exon_matrix
+#CSUB -q c02
+#CSUB -n 16
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_exon_salvage/matrix.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_exon_salvage/matrix.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/05_rna_umap/118_build_rna_exon_salvage_matrix.py"
+EVIDENCE_SUMMARY="$PROJECT/08_qc_summary/35_rna_expression_evidence_audit/rna_expression_evidence_audit_summary.tsv"
+BY_FILE="$PROJECT/10_downstream_analysis/05_rna_expression_evidence_audit/by_file"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, numpy' || {
+  echo "[ERROR] snTAPS_analysis lacks h5py or numpy" >&2
+  exit 2
+}
+for path in "$SCRIPT" "$EVIDENCE_SUMMARY"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+[[ "$(awk -F '\t' '$1=="status"{print $2; exit}' "$EVIDENCE_SUMMARY")" == "validated" ]] || {
+  echo "[ERROR] RNA evidence audit is not validated" >&2
+  exit 2
+}
+completed="$(find "$BY_FILE" -mindepth 2 -maxdepth 2 -type f \
+  -name '*.evidence_mode_summary.json' -size +0c 2>/dev/null | wc -l)"
+(( completed == 96 )) || {
+  echo "[ERROR] expected 96 evidence recounts, found $completed" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/rna_exon_salvage"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --min-umis 5 \
+  --min-genes 3

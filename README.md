@@ -29,7 +29,7 @@
 │   ├── 03_joint_reference/      人+猪联合参考及索引
 │   ├── 04_rna_star/             RNA 单端 STAR
 │   └── 05_dna_bwa/              DNA paired-end BWA
-└── 04_postmapping/
+├── 04_postmapping/
     ├── 01_input_validation/     全量输入校验与任务清单
     ├── 02_dna_deduplication/    DNA CB-aware PCR 去重
     ├── 03_rna_expression/       RNA GeneFull UMI 矩阵
@@ -38,7 +38,8 @@
     ├── 06_dna_signal_tracks/    WCG/GCH pseudo-bulk 轨迹与 BigWig
     ├── 07_matrix_packaging/     DNA/RNA 完整稀疏矩阵封装
     ├── 08_single_cell_qc/       完成度和单细胞覆盖质控
-    └── 90_optional_validation/  曾用于方法决策的可选 Probe
+│   └── 90_optional_validation/  曾用于方法决策的可选 Probe
+└── 05_downstream_analysis/      100-kb/TSS/ortholog 矩阵、QC 审计与 UMAP
 ```
 
 完整脚本索引、逐步输入和输出见 [分析流程与代码说明](docs/分析流程与代码说明.md)。删除和保留依据见 [版本整理与删减记录](docs/版本整理与删减记录.md)。
@@ -78,3 +79,9 @@ python -m unittest discover -s tests -v
 ## 版本范围
 
 本仓库从本地 `snmar_2607_project_code_v19` 整理而来。旧版错误代码、一次性删除脚本及未采用的组合入口未迁入；原始 v19 备份没有被修改。
+
+2026-08-31 的迁移分支新增了旧服务器最后导出的完整代码快照、尚未收尾的
+`05_downstream_analysis` 阶段，以及物种分开的 IGV BigWig 入口。快照位于
+`archive/e-drive-import-20260831/`，与整理后的主线并存，避免丢失正在进行的
+版本。迁移时的数据保留边界见
+[`docs/DATA_MIGRATION_20260831.md`](docs/DATA_MIGRATION_20260831.md)。

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Step 125 template: aggregate one physical well into TSS promoter matrices.
+# Submit only through step 126; placeholders are intentionally unresolved.
+#CSUB -J snMAR_TSS_w__WELL_INDEX__
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_tss_umap/well___WELL_INDEX__.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_tss_umap/well___WELL_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/06_dna_tss_umap/123_build_dna_tss_well_matrix.py"
+INDEX_SUMMARY="$PROJECT/08_qc_summary/38_dna_tss_promoters/dna_tss_promoter_index_summary.tsv"
+WELL_INDEX="__WELL_INDEX__"
+FORCE="__FORCE__"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ "$WELL_INDEX" =~ ^[0-9]+$ ]] && (( WELL_INDEX >= 1 && WELL_INDEX <= 96 )) || {
+  echo "[ERROR] step 125 is an unrendered template; submit through step 126" >&2
+  exit 2
+}
+[[ "$FORCE" =~ ^[01]$ ]] || exit 2
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import h5py, numpy' || {
+  echo "[ERROR] snTAPS_align lacks h5py or numpy" >&2
+  exit 2
+}
+for path in "$SCRIPT" "$INDEX_SUMMARY"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+[[ "$(awk -F '\t' '$1=="status"{print $2; exit}' "$INDEX_SUMMARY")" == "validated" ]] || {
+  echo "[ERROR] TSS promoter index is not validated" >&2
+  exit 2
+}
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_tss_umap"
+cd "$PROJECT"
+arguments=(--project "$PROJECT" --well-index "$WELL_INDEX")
+if [[ "$FORCE" == "1" ]]; then
+  arguments+=(--force)
+fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

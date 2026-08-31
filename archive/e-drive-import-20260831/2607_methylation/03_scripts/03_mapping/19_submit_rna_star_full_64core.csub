@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Step 19: full RNA R1-only mapping to the joint human+pig STAR index.
+#
+# Default CPU plan: 8 files in parallel x 8 STAR threads = 64 STAR threads.
+# Run this only after reviewing the step 18 probe summary.
+#
+#CSUB -J snMAR_RNA_STARfull64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/03_mapping/19_rna_star_full64.out
+#CSUB -e 09_logs/03_mapping/19_rna_star_full64.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+RNA_ALIGN_ENV="${RNA_ALIGN_ENV:-snTAPS_align}"
+conda activate "$RNA_ALIGN_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="$PROJECT/03_scripts/03_mapping"
+FASTP_QC="${RNA_R1_FASTP_QC_ROOT:-$PROJECT/08_qc_summary/07_rna_r1_fastp_full}"
+FASTP_PER_FILE="$FASTP_QC/rna_r1_fastp_full_per_file.tsv"
+CLEAN_ROOT="${RNA_R1_CLEAN_ROOT:-$PROJECT/05_fastp/rna_r1_strict}"
+INDEX_DIR="${RNA_STAR_INDEX:-$PROJECT/02_reference/rna_human_pig_joint/star_index_sjdb149}"
+OUTPUT_ROOT="${RNA_STAR_FULL_ROOT:-$PROJECT/06_mapping/rna_star_joint}"
+QC_ROOT="${RNA_STAR_FULL_QC_ROOT:-$PROJECT/08_qc_summary/09_rna_star_full}"
+LOG_ROOT="$PROJECT/09_logs/03_mapping/rna_star_full_by_file"
+TMP_ROOT="${RNA_STAR_FULL_TMP_ROOT:-${TMPDIR:-$PROJECT/06_mapping/rna_star_tmp_full}}"
+ALL_TABLE="$QC_ROOT/rna_star_all_inputs.tsv"
+PROBE_TABLE="$QC_ROOT/rna_star_probe_inputs.tsv"
+
+STAR_REQUESTED="${STAR:-STAR}"
+SAMTOOLS_REQUESTED="${SAMTOOLS:-samtools}"
+PYTHON_REQUESTED="${PYTHON:-python}"
+STAR_BIN="$(command -v "$STAR_REQUESTED" || true)"
+SAMTOOLS_BIN="$(command -v "$SAMTOOLS_REQUESTED" || true)"
+PYTHON_BIN="$(command -v "$PYTHON_REQUESTED" || true)"
+
+export PARALLEL_FILES="${PARALLEL_FILES:-8}"
+export STAR_THREADS="${STAR_THREADS:-8}"
+export SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-4}"
+export BAM_SORT_THREADS="${BAM_SORT_THREADS:-2}"
+export BAM_SORT_RAM="${BAM_SORT_RAM:-8000000000}"
+export GENOME_LOAD="${GENOME_LOAD:-LoadAndKeep}"
+export REMOVE_SHARED_GENOME="${REMOVE_SHARED_GENOME:-1}"
+export FORCE="${FORCE:-0}"
+EXPECTED_TOTAL_R1_READS="${EXPECTED_TOTAL_R1_READS:-24737553}"
+
+for name in PARALLEL_FILES STAR_THREADS SAMTOOLS_THREADS BAM_SORT_THREADS \
+  BAM_SORT_RAM REMOVE_SHARED_GENOME FORCE EXPECTED_TOTAL_R1_READS; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] $name must be a non-negative integer: $value" >&2
+    exit 2
+  }
+done
+(( PARALLEL_FILES >= 1 && STAR_THREADS >= 1 && \
+   PARALLEL_FILES * STAR_THREADS <= 64 )) || {
+  echo "[ERROR] PARALLEL_FILES x STAR_THREADS must be within 64 CPUs" >&2
+  exit 2
+}
+(( SAMTOOLS_THREADS >= 1 && BAM_SORT_THREADS >= 1 && \
+   BAM_SORT_RAM >= 1000000000 )) || exit 2
+(( REMOVE_SHARED_GENOME == 0 || REMOVE_SHARED_GENOME == 1 )) || exit 2
+(( FORCE == 0 || FORCE == 1 )) || exit 2
+[[ "$GENOME_LOAD" == "LoadAndKeep" || \
+   "$GENOME_LOAD" == "NoSharedMemory" ]] || {
+  echo "[ERROR] GENOME_LOAD must be LoadAndKeep or NoSharedMemory" >&2
+  exit 2
+}
+
+cd "$PROJECT"
+mkdir -p "$OUTPUT_ROOT" "$QC_ROOT" "$LOG_ROOT" "$TMP_ROOT" \
+  "$PROJECT/09_logs/03_mapping"
+
+for value_name in STAR_BIN SAMTOOLS_BIN PYTHON_BIN; do
+  value="${!value_name}"
+  [[ -n "$value" && -x "$value" ]] || {
+    echo "[ERROR] unavailable executable: $value_name" >&2
+    exit 127
+  }
+done
+for path in \
+  "$FASTP_PER_FILE" \
+  "$MAPPING_DIR/14_discover_rna_star_inputs.py" \
+  "$MAPPING_DIR/15_rna_fastq_sam_tags.py" \
+  "$MAPPING_DIR/16_run_rna_star_one.sh" \
+  "$MAPPING_DIR/17_summarize_rna_star.py" \
+  "$INDEX_DIR/Genome" "$INDEX_DIR/SA" "$INDEX_DIR/SAindex" \
+  "$INDEX_DIR/.snmar_star_index_done.tsv"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+export PROJECT MAPPING_DIR INDEX_DIR OUTPUT_ROOT LOG_ROOT TMP_ROOT
+export STAR_BIN SAMTOOLS_BIN PYTHON_BIN
+STAR_VERSION="$("$STAR_BIN" --version 2>&1 | head -n 1)"
+SAMTOOLS_VERSION="$("$SAMTOOLS_BIN" --version 2>&1 | head -n 1)"
+export STAR_VERSION SAMTOOLS_VERSION
+
+"$PYTHON_BIN" "$MAPPING_DIR/14_discover_rna_star_inputs.py" \
+  --fastp-per-file "$FASTP_PER_FILE" \
+  --clean-root "$CLEAN_ROOT" \
+  --all-out "$ALL_TABLE" \
+  --probe-out "$PROBE_TABLE" \
+  --expected-files 96 \
+  --probe-files 8 \
+  --expected-total-reads "$EXPECTED_TOTAL_R1_READS"
+
+SHARED_LOADED=0
+cleanup_shared() {
+  rc=$?
+  if (( SHARED_LOADED == 1 && REMOVE_SHARED_GENOME == 1 )); then
+    echo "[INFO] removing joint STAR index from shared memory"
+    "$STAR_BIN" \
+      --genomeDir "$INDEX_DIR" \
+      --genomeLoad Remove \
+      --runThreadN 1 || \
+      echo "[WARN] STAR shared-memory removal returned non-zero" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup_shared EXIT
+
+if [[ "$GENOME_LOAD" == "LoadAndKeep" ]]; then
+  echo "[INFO] loading joint STAR index once for concurrent full workers"
+  "$STAR_BIN" \
+    --genomeDir "$INDEX_DIR" \
+    --genomeLoad LoadAndExit \
+    --runThreadN 1
+  SHARED_LOADED=1
+fi
+
+echo "[INFO] full files=96 parallel=$PARALLEL_FILES"
+awk -F $'\t' 'NR > 1 {print $1, $2, $3, $4}' "$ALL_TABLE" |
+  xargs -r -n 4 -P "$PARALLEL_FILES" \
+    bash "$MAPPING_DIR/16_run_rna_star_one.sh" full
+
+"$PYTHON_BIN" "$MAPPING_DIR/17_summarize_rna_star.py" \
+  --mode full \
+  --input-table "$ALL_TABLE" \
+  --output-root "$OUTPUT_ROOT" \
+  --done-root "$LOG_ROOT" \
+  --summary "$QC_ROOT/rna_star_full_summary.tsv" \
+  --per-file "$QC_ROOT/rna_star_full_per_file.tsv" \
+  --expected-files 96
+
+echo "[OK] full RNA STAR mapping completed and summarized"

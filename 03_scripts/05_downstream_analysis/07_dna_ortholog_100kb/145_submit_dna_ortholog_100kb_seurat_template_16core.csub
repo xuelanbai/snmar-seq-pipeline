@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Step 145 template: run one Seurat representation on one depth set.
+# Submit only through step 146; placeholders are intentionally unresolved.
+#CSUB -J snMAR_o100_S___JOB_TAG__
+#CSUB -q c02
+#CSUB -n 16
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_ortholog_100kb/seurat___JOB_TAG__.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_ortholog_100kb/seurat___JOB_TAG__.err
+
+set -euo pipefail
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_SEURAT_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/07_dna_ortholog_100kb/144_run_dna_ortholog_100kb_seurat.R"
+RUN_ID="__RUN_ID__"
+METHOD="__METHOD__"
+JOB_TAG="__JOB_TAG__"
+FORCE="__FORCE__"
+REGRESS_DEPTH="__REGRESS_DEPTH__"
+RSCRIPT_BIN="$(command -v "${RSCRIPT:-Rscript}" || true)"
+
+grep -Eq '^__.*__$' <<< "$RUN_ID$METHOD$JOB_TAG$FORCE$REGRESS_DEPTH" && {
+  echo "[ERROR] step 145 is an unrendered template; submit through step 146" >&2
+  exit 2
+}
+[[ "$METHOD" =~ ^(ratio_paper|beta_posterior|pearson_residual|coverage_control)$ ]] || exit 2
+[[ "$FORCE" =~ ^[01]$ && "$REGRESS_DEPTH" =~ ^[01]$ ]] || exit 2
+[[ -x "$RSCRIPT_BIN" ]] || {
+  echo "[ERROR] Rscript is unavailable in ${DNA_SEURAT_ENV:-snTAPS_analysis}" >&2
+  exit 127
+}
+"$RSCRIPT_BIN" -e 'stopifnot(requireNamespace("Matrix", quietly=TRUE), requireNamespace("Seurat", quietly=TRUE))' || {
+  echo "[ERROR] the selected R environment lacks Matrix or Seurat" >&2
+  exit 2
+}
+for path in "$SCRIPT" "$PROJECT/08_qc_summary/41_dna_ortholog_100kb_seurat_input/$RUN_ID/dna_ortholog_100kb_seurat_input_summary.tsv"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+export OMP_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 MKL_NUM_THREADS=16
+cd "$PROJECT"
+arguments=(
+  --project "$PROJECT" --run-id "$RUN_ID" --method "$METHOD"
+  --resolution 0.2 --neighbors 30 --min-dist 0.30 --seed 2607
+)
+if [[ "$REGRESS_DEPTH" == "1" ]]; then arguments+=(--regress-depth); fi
+if [[ "$FORCE" == "1" ]]; then arguments+=(--force); fi
+"$RSCRIPT_BIN" "$SCRIPT" "${arguments[@]}"

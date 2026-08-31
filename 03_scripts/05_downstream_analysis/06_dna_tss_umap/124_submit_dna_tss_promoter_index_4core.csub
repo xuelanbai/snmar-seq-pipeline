@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Step 124: prepare the clipped TSS promoter and conservative ortholog index.
+#CSUB -J snMAR_DNA_TSS_index
+#CSUB -q c02
+#CSUB -n 4
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_tss_umap/index.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_tss_umap/index.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/06_dna_tss_umap/122_prepare_dna_tss_promoters.py"
+GTF="${JOINT_GTF:-$PROJECT/02_reference/rna_human_pig_joint/human_pig.prefixed.gtf}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+FORCE_TSS_INDEX="${FORCE_TSS_INDEX:-0}"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+for path in "$SCRIPT" "$GTF"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_tss_umap"
+cd "$PROJECT"
+arguments=(--project "$PROJECT" --gtf "$GTF" --flank 1500)
+if [[ "$FORCE_TSS_INDEX" == "1" ]]; then
+  arguments+=(--force)
+fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

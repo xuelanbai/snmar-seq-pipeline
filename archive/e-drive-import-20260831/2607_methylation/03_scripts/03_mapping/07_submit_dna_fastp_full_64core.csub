@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# Full DNA XD=0 paired pre-trimming + fastp, optimized for 64 allocated CPUs.
+#
+# Older fastp versions may pre-read /dev/fd process-substitution inputs and
+# cannot seek back, which silently drops reads. This version first creates
+# regular paired temporary FASTQ files, then gives those files to fastp.
+#
+# Defaults: 8 pairs in parallel x 6 fastp threads = 48 worker threads.
+# Remaining CPUs are reserved for paired pre-trimming, gzip, readers/writers,
+# filesystem I/O, and the job shell.
+#
+#CSUB -J snMAR_DNAfastpFull64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -o 09_logs/03_mapping/07_dna_fastp_full64.out
+#CSUB -e 09_logs/03_mapping/07_dna_fastp_full64.err
+
+set -euo pipefail
+
+source /share/apps/anaconda3/etc/profile.d/conda.sh
+conda activate snTAPS_qc
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+MAPPING_DIR="$PROJECT/03_scripts/03_mapping"
+SPLIT_ROOT="${DNA_SPLIT_ROOT:-$PROJECT/04_fastq_split/write_rescue}"
+CLEAN_ROOT="${DNA_CLEAN_ROOT:-$PROJECT/05_fastp/dna_strict}"
+QC_ROOT="${DNA_FASTP_QC_ROOT:-$PROJECT/08_qc_summary/04_dna_fastp_full}"
+JSON_ROOT="$QC_ROOT/fastp_json"
+PRETRIM_STAT_ROOT="$QC_ROOT/pretrim_by_pair"
+LOG_ROOT="$PROJECT/09_logs/03_mapping/dna_fastp_full_by_pair"
+DEMUX_PER_PAIR="${DEMUX_PER_PAIR:-$PROJECT/08_qc_summary/01_demultiplex/write_rescue_per_pair.tsv}"
+PAIR_TABLE="$QC_ROOT/dna_pairs.tsv"
+TMP_ROOT="${DNA_FASTP_TMP_ROOT:-${TMPDIR:-$PROJECT/05_fastp/dna_strict_tmp}}"
+FASTP_REQUESTED="${FASTP:-fastp}"
+PYTHON_REQUESTED="${PYTHON:-python}"
+FASTP="$(command -v "$FASTP_REQUESTED" || true)"
+PYTHON="$(command -v "$PYTHON_REQUESTED" || true)"
+
+export JOBS=64
+export PARALLEL_PAIRS="${PARALLEL_PAIRS:-8}"
+export FASTP_THREADS="${FASTP_THREADS:-6}"
+export PRETRIM_GZIP_LEVEL="${PRETRIM_GZIP_LEVEL:-1}"
+export FASTP_COMPRESSION="${FASTP_COMPRESSION:-1}"
+export DETECT_ADAPTER_FOR_PE="${DETECT_ADAPTER_FOR_PE:-1}"
+export KEEP_TMP="${KEEP_TMP:-0}"
+export FORCE="${FORCE:-0}"
+export TOTAL_TRIM_FRONT1="${TOTAL_TRIM_FRONT1:-30}"
+export TOTAL_TRIM_FRONT2="${TOTAL_TRIM_FRONT2:-43}"
+
+for name in \
+  PARALLEL_PAIRS FASTP_THREADS PRETRIM_GZIP_LEVEL FASTP_COMPRESSION \
+  DETECT_ADAPTER_FOR_PE KEEP_TMP FORCE TOTAL_TRIM_FRONT1 TOTAL_TRIM_FRONT2; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] $name must be a non-negative integer: $value" >&2
+    exit 2
+  }
+done
+(( PARALLEL_PAIRS >= 1 )) || exit 2
+(( FASTP_THREADS >= 1 )) || exit 2
+(( PRETRIM_GZIP_LEVEL >= 1 && PRETRIM_GZIP_LEVEL <= 9 )) || exit 2
+(( FASTP_COMPRESSION >= 1 && FASTP_COMPRESSION <= 9 )) || exit 2
+(( DETECT_ADAPTER_FOR_PE == 0 || DETECT_ADAPTER_FOR_PE == 1 )) || exit 2
+(( KEEP_TMP == 0 || KEEP_TMP == 1 )) || exit 2
+(( FORCE == 0 || FORCE == 1 )) || exit 2
+
+cd "$PROJECT"
+mkdir -p \
+  "$CLEAN_ROOT" "$QC_ROOT" "$JSON_ROOT" "$PRETRIM_STAT_ROOT" \
+  "$LOG_ROOT" "$TMP_ROOT"
+
+[[ -n "$FASTP" && -x "$FASTP" ]] || {
+  echo "[ERROR] fastp is unavailable after activating snTAPS_analysis: $FASTP_REQUESTED" >&2
+  exit 127
+}
+[[ -n "$PYTHON" && -x "$PYTHON" ]] || {
+  echo "[ERROR] python is unavailable after activating snTAPS_analysis: $PYTHON_REQUESTED" >&2
+  exit 127
+}
+for command_name in gzip mktemp awk xargs; do
+  command -v "$command_name" >/dev/null 2>&1 || {
+    echo "[ERROR] command not found: $command_name" >&2
+    exit 127
+  }
+done
+
+for script in \
+  "$MAPPING_DIR/02_discover_dna_assigned_pairs.py" \
+  "$MAPPING_DIR/03_prepare_dna_xd0_front_trim.py" \
+  "$MAPPING_DIR/06_summarize_dna_fastp_full.py"; do
+  [[ -s "$script" ]] || {
+    echo "[ERROR] missing script: $script" >&2
+    exit 2
+  }
+done
+[[ -s "$DEMUX_PER_PAIR" ]] || {
+  echo "[ERROR] missing demultiplex table: $DEMUX_PER_PAIR" >&2
+  exit 2
+}
+
+"$PYTHON" "$MAPPING_DIR/02_discover_dna_assigned_pairs.py" \
+  --split-root "$SPLIT_ROOT" \
+  --out "$PAIR_TABLE" \
+  --expected-pairs 768
+
+run_one() {
+  # Avoid propagating fastp status 255 directly to xargs.
+  set -uo pipefail
+
+  local pair_id="$1"
+  local sample="$2"
+  local r1="$3"
+  local r2="$4"
+  local clean_dir="$CLEAN_ROOT/$sample"
+  local json_dir="$JSON_ROOT/$sample"
+  local stat_dir="$PRETRIM_STAT_ROOT/$sample"
+  local clean_r1="$clean_dir/${pair_id}.clean_R1.fq.gz"
+  local clean_r2="$clean_dir/${pair_id}.clean_R2.fq.gz"
+  local json="$json_dir/${pair_id}.fastp.json"
+  local html="$json_dir/${pair_id}.fastp.html"
+  local pretrim_stat="$stat_dir/${pair_id}.pretrim.tsv"
+  local log="$LOG_ROOT/${pair_id}.log"
+  local done_file="$LOG_ROOT/${pair_id}.done"
+  local failed_file="$LOG_ROOT/${pair_id}.failed"
+  local tmp_dir=""
+  local tmp_r1=""
+  local tmp_r2=""
+  local expected_xd0=""
+  local pretrim_xd0=""
+  local pretrim_output=""
+  local fastp_before=""
+  local rc=0
+
+  mkdir -p "$clean_dir" "$json_dir" "$stat_dir"
+  if [[ "$FORCE" -eq 0 && -s "$done_file" && \
+        -s "$clean_r1" && -s "$clean_r2" && \
+        -s "$json" && -s "$html" && -s "$pretrim_stat" ]]; then
+    echo "[INFO] skip completed $pair_id"
+    return 0
+  fi
+
+  rm -f \
+    "$done_file" "$failed_file" "$clean_r1" "$clean_r2" \
+    "$json" "$html" "$pretrim_stat"
+  : >"$log"
+
+  {
+    echo "[INFO] start=$pair_id"
+    echo "[INFO] sample=$sample"
+    echo "[INFO] total_fixed_trim: R1=$TOTAL_TRIM_FRONT1 R2=$TOTAL_TRIM_FRONT2"
+    echo "[INFO] parallel_pairs=$PARALLEL_PAIRS fastp_threads=$FASTP_THREADS"
+    "$FASTP" --version 2>&1 || true
+
+    if [[ ! -s "$r1" || ! -s "$r2" ]]; then
+      rc=66
+      echo "[ERROR] missing/empty input FASTQ"
+    fi
+
+    if (( rc == 0 )); then
+      expected_xd0=$(
+        awk -F $'\t' -v p="$pair_id" \
+          '$1 == p && $3 == "assigned_XD0" {print $4; exit}' \
+          "$DEMUX_PER_PAIR"
+      )
+      if [[ ! "$expected_xd0" =~ ^[0-9]+$ ]]; then
+        rc=65
+        echo "[ERROR] invalid assigned_XD0: $expected_xd0"
+      else
+        echo "[INFO] expected_XD0_pairs=$expected_xd0"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      tmp_dir=$(mktemp -d "$TMP_ROOT/${pair_id}.XXXXXX") || rc=$?
+      if (( rc == 0 )); then
+        tmp_r1="$tmp_dir/${pair_id}.pretrim_R1.fq.gz"
+        tmp_r2="$tmp_dir/${pair_id}.pretrim_R2.fq.gz"
+        echo "[INFO] tmp_dir=$tmp_dir"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      "$PYTHON" "$MAPPING_DIR/03_prepare_dna_xd0_front_trim.py" \
+        --pair-id "$pair_id" \
+        --sample "$sample" \
+        --r1 "$r1" \
+        --r2 "$r2" \
+        --out-r1 "$tmp_r1" \
+        --out-r2 "$tmp_r2" \
+        --stat "$pretrim_stat" \
+        --trim-front-r1 "$TOTAL_TRIM_FRONT1" \
+        --trim-front-r2 "$TOTAL_TRIM_FRONT2" \
+        --gzip-level "$PRETRIM_GZIP_LEVEL" || rc=$?
+    fi
+
+    if (( rc == 0 )); then
+      if [[ ! -s "$tmp_r1" || ! -s "$tmp_r2" || ! -s "$pretrim_stat" ]]; then
+        rc=70
+        echo "[ERROR] missing/empty paired pretrim output"
+      elif ! gzip -t "$tmp_r1" "$tmp_r2"; then
+        rc=65
+        echo "[ERROR] pretrim gzip integrity check failed"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      pretrim_xd0=$(awk -F $'\t' 'NR == 2 {print $4}' "$pretrim_stat")
+      pretrim_output=$(awk -F $'\t' 'NR == 2 {print $7}' "$pretrim_stat")
+      echo "[INFO] pretrim_XD0_pairs=$pretrim_xd0"
+      echo "[INFO] pretrim_output_pairs=$pretrim_output"
+      if [[ ! "$pretrim_xd0" =~ ^[0-9]+$ || \
+            ! "$pretrim_output" =~ ^[0-9]+$ ]] || \
+         (( pretrim_xd0 != expected_xd0 || pretrim_output != expected_xd0 )); then
+        rc=65
+        echo "[ERROR] pretrim/demultiplex count mismatch"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      local fastp_cmd=(
+        "$FASTP"
+        --in1 "$tmp_r1"
+        --in2 "$tmp_r2"
+        --out1 "$clean_r1"
+        --out2 "$clean_r2"
+        --trim_front1 0
+        --trim_front2 0
+        --qualified_quality_phred 20
+        --unqualified_percent_limit 30
+        --length_required 30
+        --cut_front
+        --cut_tail
+        --cut_window_size 4
+        --cut_mean_quality 20
+        --trim_poly_g
+        --poly_g_min_len 10
+        --dont_eval_duplication
+        --compression "$FASTP_COMPRESSION"
+        --thread "$FASTP_THREADS"
+        --json "$json"
+        --html "$html"
+        --report_title "snMAR DNA XD0 $pair_id"
+      )
+      if (( DETECT_ADAPTER_FOR_PE == 1 )); then
+        fastp_cmd+=(--detect_adapter_for_pe)
+      fi
+      "${fastp_cmd[@]}" || rc=$?
+    fi
+
+    if (( rc == 0 )); then
+      if [[ ! -s "$clean_r1" || ! -s "$clean_r2" || \
+            ! -s "$json" || ! -s "$html" ]]; then
+        rc=70
+        echo "[ERROR] missing/empty fastp output"
+      elif ! gzip -t "$clean_r1" "$clean_r2"; then
+        rc=65
+        echo "[ERROR] fastp gzip integrity check failed"
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      if ! fastp_before=$(
+        "$PYTHON" -c \
+          'import json,sys; print(json.load(open(sys.argv[1]))["summary"]["before_filtering"]["total_reads"])' \
+          "$json"
+      ); then
+        rc=65
+        echo "[ERROR] cannot read fastp before_filtering.total_reads"
+      elif [[ ! "$fastp_before" =~ ^[0-9]+$ ]] || \
+           (( fastp_before != expected_xd0 * 2 )); then
+        rc=65
+        echo "[ERROR] fastp_before_reads=$fastp_before expected=$((expected_xd0 * 2))"
+      else
+        echo "[INFO] fastp_before_reads=$fastp_before"
+        echo "[INFO] expected_before_reads=$((expected_xd0 * 2))"
+      fi
+    fi
+
+    if [[ -n "$tmp_dir" && -d "$tmp_dir" ]]; then
+      if (( KEEP_TMP == 1 )); then
+        echo "[INFO] keeping temporary directory: $tmp_dir"
+      else
+        case "$tmp_dir" in
+          "$TMP_ROOT"/*) rm -rf -- "$tmp_dir" ;;
+          *)
+            rc=74
+            echo "[ERROR] refused unsafe cleanup target: $tmp_dir"
+            ;;
+        esac
+      fi
+    fi
+
+    if (( rc == 0 )); then
+      echo "[INFO] done=$pair_id"
+    fi
+  } >>"$log" 2>&1
+
+  if (( rc != 0 )); then
+    rm -f "$done_file" "$clean_r1" "$clean_r2" "$json" "$html"
+    {
+      echo -e "pair_id\t${pair_id}"
+      echo -e "sample\t${sample}"
+      echo -e "exit_status\t${rc}"
+      echo -e "log\t${log}"
+      echo -e "time\t$(date -Is)"
+    } >"$failed_file"
+    echo "[ERROR] pair failed: $pair_id (status=$rc; log=$log)" >&2
+    tail -n 80 "$log" >&2 || true
+    return 1
+  fi
+
+  date -Is >"$done_file"
+  return 0
+}
+
+export -f run_one
+export \
+  MAPPING_DIR CLEAN_ROOT JSON_ROOT PRETRIM_STAT_ROOT LOG_ROOT TMP_ROOT \
+  DEMUX_PER_PAIR FASTP PYTHON PARALLEL_PAIRS FASTP_THREADS \
+  PRETRIM_GZIP_LEVEL FASTP_COMPRESSION DETECT_ADAPTER_FOR_PE KEEP_TMP FORCE \
+  TOTAL_TRIM_FRONT1 TOTAL_TRIM_FRONT2
+
+if ! tail -n +2 "$PAIR_TABLE" |
+  while IFS=$'\t' read -r pair_id sample r1 r2; do
+    printf '%s\0%s\0%s\0%s\0' "$pair_id" "$sample" "$r1" "$r2"
+  done |
+  xargs -0 -P "$PARALLEL_PAIRS" -n 4 bash -c 'run_one "$@"' _; then
+  failed_count=$(find "$LOG_ROOT" -maxdepth 1 -type f -name '*.failed' | wc -l)
+  echo "[ERROR] DNA fastp had ${failed_count} failed pair(s)." >&2
+  find "$LOG_ROOT" -maxdepth 1 -type f -name '*.failed' -print |
+    sort |
+    head -n 30 >&2
+  exit 1
+fi
+
+"$PYTHON" "$MAPPING_DIR/06_summarize_dna_fastp_full.py" \
+  --pair-table "$PAIR_TABLE" \
+  --demux-per-pair "$DEMUX_PER_PAIR" \
+  --pretrim-stat-root "$PRETRIM_STAT_ROOT" \
+  --clean-root "$CLEAN_ROOT" \
+  --json-root "$JSON_ROOT" \
+  --summary "$QC_ROOT/dna_fastp_full_summary.tsv" \
+  --per-pair "$QC_ROOT/dna_fastp_full_per_pair.tsv"
+
+echo "[INFO] full DNA fastp complete"

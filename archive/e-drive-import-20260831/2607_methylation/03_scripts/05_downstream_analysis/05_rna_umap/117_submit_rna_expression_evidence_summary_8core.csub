@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Step 117: summarize all 96 RNA expression-evidence recounts.
+#CSUB -J snMAR_RNA_evidence_summary
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_expression_evidence/summary.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_expression_evidence/summary.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/05_rna_umap/116_summarize_rna_expression_evidence.py"
+BY_FILE="$PROJECT/10_downstream_analysis/05_rna_expression_evidence_audit/by_file"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || exit 127
+"$PYTHON_BIN" -c 'import matplotlib' || {
+  echo "[ERROR] snTAPS_analysis lacks matplotlib" >&2
+  exit 2
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+completed="$(find "$BY_FILE" -mindepth 2 -maxdepth 2 -type f \
+  -name '*.evidence_mode_summary.json' -size +0c 2>/dev/null | wc -l)"
+(( completed == 96 )) || {
+  echo "[ERROR] expected 96 evidence summaries, found $completed" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/rna_expression_evidence"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" --project "$PROJECT"

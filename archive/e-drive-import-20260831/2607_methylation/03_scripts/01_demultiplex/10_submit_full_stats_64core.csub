@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Step 10: submit the 64-core full-statistics job.
+#CSUB -J snMAR_splitStat64
+#CSUB -q c02
+#CSUB -n 64
+#CSUB -o 09_logs/01_demultiplex/10_full_stats64.out
+#CSUB -e 09_logs/01_demultiplex/10_full_stats64.err
+
+set -euo pipefail
+
+PROJECT=/share/org/YZWL/yzwl_wujx/Projects/2607_methylation
+cd "$PROJECT"
+
+mkdir -p 09_logs/01_demultiplex
+
+export PROJECT
+export JOBS=64
+
+bash 03_scripts/01_demultiplex/06_run_demultiplex.sh full-stats
