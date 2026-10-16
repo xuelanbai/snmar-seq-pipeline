@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Step 104: primary DNA 100 kb UMAP at D20 (4,778 cells in this batch).
+#CSUB -J snMAR_DNA_UMAP_D20
+#CSUB -q c02
+#CSUB -n 32
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_100kb_umap/D20.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_100kb_umap/D20.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/04_dna_umap/103_build_dna_100kb_umap.py"
+THREADS="${THREADS:-32}"
+FORCE_UMAP="${FORCE_UMAP:-0}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+"$PYTHON_BIN" -c \
+  'import h5py, matplotlib, numpy, scipy, sklearn, umap' || {
+  echo "[ERROR] snTAPS_analysis lacks DNA UMAP dependencies" >&2
+  echo "[HINT] conda install -n snTAPS_analysis -c conda-forge scipy scikit-learn umap-learn matplotlib" >&2
+  exit 2
+}
+
+export OMP_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_100kb_umap"
+cd "$PROJECT"
+
+arguments=(
+  --project "$PROJECT"
+  --min-total-calls 20000
+  --min-bin-cells 20
+  --min-bin-covered-calls 100
+  --max-features-per-context 20000
+  --svd-components 30
+  --neighbors 30
+  --min-dist 0.30
+  --seed 2607
+  --threads "$THREADS"
+)
+if [[ "$FORCE_UMAP" == "1" ]]; then
+  arguments+=(--force)
+fi
+"$PYTHON_BIN" "$SCRIPT" "${arguments[@]}"

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Step 97: run the complete DNA/RNA cell-QC threshold audit.
+#CSUB -J snMAR_cell_QC_threshold_audit
+#CSUB -q c02
+#CSUB -n 4
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/cell_qc_threshold_audit.out
+#CSUB -e 09_logs/05_downstream_analysis/cell_qc_threshold_audit.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/03_cell_qc_filtering/96_audit_cell_qc_thresholds.py"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --expected-wells "${EXPECTED_WELLS:-96}" \
+  --approx-nuclei-per-well "${APPROX_NUCLEI_PER_WELL:-40}"

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Step 86: build prefix-free BigWigs for single-species IGV references.
+#
+#CSUB -J snMAR_DNA_IGV_BW
+#CSUB -q c02
+#CSUB -n 16
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/04_postmapping/86_dna_igv_bigwig.out
+#CSUB -e 09_logs/04_postmapping/86_dna_igv_bigwig.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+BIGWIG_ENV="${BIGWIG_ENV:-foodie_env}"
+conda activate "$BIGWIG_ENV"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
+SPECIES="${SPECIES:-all}"
+HUMAN_REFERENCE="${HUMAN_IGV_REFERENCE:-${HUMAN_FASTA:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_project/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa}}"
+PIG_REFERENCE="${PIG_IGV_REFERENCE:-${PIG_FASTA:-/share/org/YZWL/yzwl_wujx/Projects/FOODIE_pig/reference/Sus_scrofa.Sscrofa11.1.dna.toplevel.fa}}"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+BEDGRAPH_TO_BIGWIG="$(
+  command -v "${BEDGRAPH_TO_BIGWIG_REQUESTED:-bedGraphToBigWig}" || true
+)"
+
+[[ "$SPECIES" == "all" || "$SPECIES" == "human" || \
+   "$SPECIES" == "pig" ]] || {
+  echo "[ERROR] SPECIES must be all, human, or pig" >&2
+  exit 2
+}
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable in $BIGWIG_ENV" >&2
+  exit 127
+}
+[[ -x "$BEDGRAPH_TO_BIGWIG" ]] || {
+  echo "[ERROR] bedGraphToBigWig is unavailable in $BIGWIG_ENV" >&2
+  exit 127
+}
+script="$POST_DIR/06_dna_signal_tracks/85_build_igv_species_bigwigs.py"
+[[ -s "$script" ]] || exit 2
+if [[ "$SPECIES" == "all" || "$SPECIES" == "human" ]]; then
+  for path in "$HUMAN_REFERENCE" "$HUMAN_REFERENCE.fai"; do
+    [[ -s "$path" ]] || {
+      echo "[ERROR] missing/empty human IGV reference prerequisite: $path" >&2
+      exit 2
+    }
+  done
+fi
+if [[ "$SPECIES" == "all" || "$SPECIES" == "pig" ]]; then
+  for path in "$PIG_REFERENCE" "$PIG_REFERENCE.fai"; do
+    [[ -s "$path" ]] || {
+      echo "[ERROR] missing/empty pig IGV reference prerequisite: $path" >&2
+      exit 2
+    }
+  done
+fi
+
+mkdir -p "$PROJECT/09_logs/04_postmapping"
+cd "$PROJECT"
+"$PYTHON_BIN" "$script" \
+  --project "$PROJECT" \
+  --species "$SPECIES" \
+  --human-reference "$HUMAN_REFERENCE" \
+  --pig-reference "$PIG_REFERENCE" \
+  --bedgraph-to-bigwig "$BEDGRAPH_TO_BIGWIG"

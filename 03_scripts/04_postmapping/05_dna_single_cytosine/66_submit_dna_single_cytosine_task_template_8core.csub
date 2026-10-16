@@ -21,7 +21,7 @@ TASK_INDEX="__TASK_INDEX__"
 SAMTOOLS_THREADS="${SAMTOOLS_THREADS:-4}"
 FORCE="${FORCE:-__FORCE__}"
 
-if [[ "$TASK_INDEX" == "__TASK_INDEX__" || "$FORCE" == "__FORCE__" ]]; then
+if [[ "$TASK_INDEX" == *"__"* || "$FORCE" == *"__"* ]]; then
   echo "[ERROR] step 66 is an unrendered job template." >&2
   echo "[HINT] submit tasks through step 67, not with 'csub < 66_...'." >&2
   exit 2

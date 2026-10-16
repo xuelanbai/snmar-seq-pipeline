@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# One-well template; upstream sample index is the physical-well index.
+#CSUB -J snMAR_100kb___SAMPLE_INDEX__
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_100kb/sample___SAMPLE_INDEX__.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_100kb/sample___SAMPLE_INDEX__.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SAMPLE_INDEX="__SAMPLE_INDEX__"
+BIN_SIZE="${BIN_SIZE:-100000}"
+FORCE="${FORCE:-__FORCE__}"
+
+if [[ "$SAMPLE_INDEX" == *"__"* || "$FORCE" == *"__"* ]]; then
+  echo "[ERROR] step 88 is an unrendered template; submit through step 89." >&2
+  exit 2
+fi
+for name in SAMPLE_INDEX BIN_SIZE FORCE; do
+  value="${!name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] $name must be an integer: $value" >&2
+    exit 2
+  }
+done
+(( SAMPLE_INDEX >= 1 && SAMPLE_INDEX <= 96 && BIN_SIZE >= 1 && FORCE <= 1 )) || exit 2
+
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/01_dna_100kb_bins/87_build_dna_100kb_sample_matrix.py"
+TASKS="$PROJECT/08_qc_summary/20_single_cytosine_inputs/dna_single_cytosine_tasks.tsv"
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+"$PYTHON_BIN" -c 'import h5py, numpy'
+for path in "$SCRIPT" "$TASKS"; do
+  [[ -s "$path" ]] || {
+    echo "[ERROR] missing/empty prerequisite: $path" >&2
+    exit 2
+  }
+done
+
+sample="$(awk -F '\t' -v wanted="$SAMPLE_INDEX" \
+  'NR > 1 && $2 == wanted {print $3; exit}' "$TASKS")"
+[[ -n "$sample" ]] || {
+  echo "[ERROR] sample index absent from task table: $SAMPLE_INDEX" >&2
+  exit 2
+}
+SUMMARY="$PROJECT/08_qc_summary/27_dna_100kb/sample_matrices/$sample.dna_100kb.summary.tsv"
+OUTPUT_H5="$PROJECT/10_downstream_analysis/01_dna_100kb/sample_matrices/$sample.dna_100kb.h5"
+if (( FORCE == 0 )) && [[ -s "$SUMMARY" && -s "$OUTPUT_H5" ]] && \
+  awk -F '\t' -v sample="$sample" -v size="$BIN_SIZE" \
+    -v output="$OUTPUT_H5" \
+    '$1 == "status" && $2 == "validated" {ok=1}
+     $1 == "pipeline_signature" && $2 == "snmar_dna_100kb_sample_20260804" {sig=1}
+     $1 == "sample" && $2 == sample {same=1}
+     $1 == "bin_size" && $2 == size {bins=1}
+     $1 == "output_h5" && $2 == output {path=1}
+     END {exit !(ok && sig && same && bins && path)}' "$SUMMARY"; then
+  echo "[SKIP] validated DNA 100 kb sample: $SAMPLE_INDEX $sample"
+  exit 0
+fi
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_100kb"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --sample-index "$SAMPLE_INDEX" \
+  --bin-size "$BIN_SIZE"

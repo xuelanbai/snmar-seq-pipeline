@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Step 112: audit RNA read-layer versus exact-UMI species labels.
+#CSUB -J snMAR_RNA_read_UMI_audit
+#CSUB -q c02
+#CSUB -n 8
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/rna_umap/read_umi_audit.out
+#CSUB -e 09_logs/05_downstream_analysis/rna_umap/read_umi_audit.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${RNA_UMAP_ENV:-snTAPS_analysis}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/05_rna_umap/111_audit_rna_read_umi_cellline_labels.py"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+"$PYTHON_BIN" -c 'import matplotlib' || {
+  echo "[ERROR] snTAPS_analysis lacks matplotlib" >&2
+  exit 2
+}
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/rna_umap"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" \
+  --project "$PROJECT" \
+  --min-umis 25 \
+  --min-genes 10 \
+  --minimum-major-fraction 0.90

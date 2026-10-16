@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Step 91: validate 96 physical-well matrices and build one batch-wide 100 kb VDS.
+#CSUB -J snMAR_100kb_merge
+#CSUB -q c02
+#CSUB -n 16
+#CSUB -R "span[hosts=1]"
+#CSUB -o 09_logs/05_downstream_analysis/dna_100kb/merge.out
+#CSUB -e 09_logs/05_downstream_analysis/dna_100kb/merge.err
+
+set -euo pipefail
+
+source "${CONDA_SH:-/share/apps/anaconda3/etc/profile.d/conda.sh}"
+conda activate "${DNA_ALIGN_ENV:-snTAPS_align}"
+
+PROJECT="${PROJECT:-/share/org/YZWL/yzwl_wujx/Projects/2607_methylation}"
+SCRIPT_ROOT="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}"
+BIN_SIZE="${BIN_SIZE:-100000}"
+SCRIPT="$SCRIPT_ROOT/05_downstream_analysis/01_dna_100kb_bins/90_merge_dna_100kb_full_matrix.py"
+PYTHON_BIN="$(command -v "${PYTHON:-python}" || true)"
+
+[[ "$BIN_SIZE" =~ ^[0-9]+$ ]] && (( BIN_SIZE >= 1 )) || {
+  echo "[ERROR] BIN_SIZE must be a positive integer" >&2
+  exit 2
+}
+[[ -x "$PYTHON_BIN" ]] || {
+  echo "[ERROR] python is unavailable" >&2
+  exit 127
+}
+"$PYTHON_BIN" -c 'import h5py, numpy'
+[[ -s "$SCRIPT" ]] || {
+  echo "[ERROR] missing/empty script: $SCRIPT" >&2
+  exit 2
+}
+
+mkdir -p "$PROJECT/09_logs/05_downstream_analysis/dna_100kb"
+cd "$PROJECT"
+"$PYTHON_BIN" "$SCRIPT" --project "$PROJECT" --bin-size "$BIN_SIZE"

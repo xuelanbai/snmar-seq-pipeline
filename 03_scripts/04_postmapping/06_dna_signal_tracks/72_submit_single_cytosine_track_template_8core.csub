@@ -19,7 +19,7 @@ POST_DIR="${SNMAR_SCRIPT_ROOT:-$PROJECT/03_scripts}/04_postmapping"
 SHARD="__SHARD__"
 FORCE="${FORCE:-__FORCE__}"
 
-if [[ "$SHARD" == "__SHARD__" || "$FORCE" == "__FORCE__" ]]; then
+if [[ "$SHARD" == *"__"* || "$FORCE" == *"__"* ]]; then
   echo "[ERROR] step 72 is an unrendered job template." >&2
   echo "[HINT] submit track mergers through step 73." >&2
   exit 2

@@ -20,7 +20,7 @@ SAMPLE_INDEX="__SAMPLE_INDEX__"
 FORCE="${FORCE:-__FORCE__}"
 VALIDATION_SIGNATURE="snmar_single_cytosine_validation_20260801"
 
-if [[ "$SAMPLE_INDEX" == "__SAMPLE_INDEX__" || "$FORCE" == "__FORCE__" ]]; then
+if [[ "$SAMPLE_INDEX" == *"__"* || "$FORCE" == *"__"* ]]; then
   echo "[ERROR] step 69 is an unrendered job template." >&2
   echo "[HINT] submit validators through step 70." >&2
   exit 2

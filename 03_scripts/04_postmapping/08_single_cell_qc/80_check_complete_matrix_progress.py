@@ -11,6 +11,9 @@ from pathlib import Path
 
 
 VALIDATION_SIGNATURE = "snmar_single_cytosine_validation_20260801"
+RNA_SPECIES_ALIGNMENT_SIGNATURE = (
+    "snmar_rna_species_alignment_audit_20260806"
+)
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -36,6 +39,17 @@ def is_current_validation(path: Path) -> bool:
     return (
         metrics.get("status") == "validated"
         and metrics.get("pipeline_signature") == VALIDATION_SIGNATURE
+    )
+
+
+def is_validated_single_row(path: Path, signature: str) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    rows = read_tsv(path)
+    return (
+        len(rows) == 1
+        and rows[0].get("status") == "validated"
+        and rows[0].get("pipeline_signature") == signature
     )
 
 
@@ -88,17 +102,17 @@ def main() -> int:
     prepare = input_root / "single_cytosine_prepare_summary.tsv"
     tasks = read_tsv(tasks_path) if tasks_path.is_file() else []
     caller_completed = 0
-    samples: dict[int, str] = {}
+    wells: dict[int, str] = {}
     for task in tasks:
         sample_index = int(task["sample_index"])
         sample = task["sample"]
-        samples[sample_index] = sample
+        wells[sample_index] = sample
         shard = int(task["shard"])
         prefix = f"{sample}.shard_{shard:02d}"
         summary = Path(task["output_dir"]) / f"{prefix}.summary.tsv"
         caller_completed += int(is_validated(summary))
     validation_completed = 0
-    for sample_index, sample in samples.items():
+    for sample_index, sample in wells.items():
         _ = sample_index
         summary = (
             project
@@ -140,8 +154,66 @@ def main() -> int:
         / "08_qc_summary/25_dna_single_cell_qc"
         / "dna_single_cell_coverage_qc_summary.tsv"
     )
+    igv_bigwig_final = (
+        project
+        / "08_qc_summary/26_dna_igv_species_bigwig"
+        / "dna_igv_species_bigwig_summary.tsv"
+    )
+    dna_100kb_sample_root = (
+        project / "08_qc_summary/27_dna_100kb/sample_matrices"
+    )
+    dna_100kb_samples = sum(
+        is_validated(path)
+        for path in dna_100kb_sample_root.glob(
+            "*.dna_100kb.summary.tsv"
+        )
+    )
+    dna_100kb_final = (
+        project
+        / "08_qc_summary/27_dna_100kb"
+        / "dna_100kb_complete_summary.tsv"
+    )
+    cross_well_final = (
+        project
+        / "08_qc_summary/28_cross_well_overview"
+        / "snmar_96well_batch_overall_summary.tsv"
+    )
+    cb_overlap_final = (
+        project
+        / "08_qc_summary/29_cb_overlap_96wells"
+        / "cb_overlap_audit_summary.tsv"
+    )
+    threshold_audit_final = (
+        project
+        / "08_qc_summary/30_cell_qc_threshold_audit"
+        / "cell_qc_threshold_audit_summary.tsv"
+    )
+    rna_species_alignment_root = (
+        project / "08_qc_summary/31_rna_species_residual_audit/by_file"
+    )
+    rna_species_alignment_completed = sum(
+        is_validated_single_row(path, RNA_SPECIES_ALIGNMENT_SIGNATURE)
+        for path in rna_species_alignment_root.glob(
+            "*.rna_species_alignment_audit.tsv"
+        )
+    )
+    rna_species_audit_final = (
+        project
+        / "08_qc_summary/31_rna_species_residual_audit"
+        / "rna_species_residual_audit_summary.tsv"
+    )
+    dna_umap_root = project / "08_qc_summary/32_dna_100kb_umap"
+    dna_umap_completed = sum(
+        is_validated(
+            dna_umap_root / threshold / "dna_100kb_umap_summary.tsv"
+        )
+        for threshold in ("D_total_20k", "D_total_50k")
+    )
+    dna_umap_comparison = (
+        dna_umap_root / "dna_100kb_umap_comparison_summary.tsv"
+    )
     expected_tasks = 768 if tasks else 0
-    expected_samples = 96 if tasks else 0
+    expected_wells = 96 if tasks else 0
     rows: list[dict[str, object]] = [
         {
             "stage": "63-64_prepare",
@@ -158,12 +230,12 @@ def main() -> int:
             ),
         },
         {
-            "stage": "68-70_DNA_sample_validation",
+            "stage": "68-70_DNA_well_validation",
             "completed": validation_completed,
-            "expected": expected_samples,
+            "expected": expected_wells,
             "ready": int(
-                expected_samples == 96
-                and validation_completed == expected_samples
+                expected_wells == 96
+                and validation_completed == expected_wells
             ),
         },
         {
@@ -201,6 +273,69 @@ def main() -> int:
             "completed": int(is_validated(cell_qc_final)),
             "expected": 1,
             "ready": int(is_validated(cell_qc_final)),
+        },
+        {
+            "stage": "85-86_DNA_IGV_species_BigWigs",
+            "completed": int(is_validated(igv_bigwig_final)),
+            "expected": 1,
+            "ready": int(is_validated(igv_bigwig_final)),
+        },
+        {
+            "stage": "87-89_DNA_100kb_well_matrices",
+            "completed": dna_100kb_samples,
+            "expected": expected_wells,
+            "ready": int(
+                expected_wells == 96
+                and dna_100kb_samples == expected_wells
+            ),
+        },
+        {
+            "stage": "90-91_DNA_100kb_complete_matrix",
+            "completed": int(is_validated(dna_100kb_final)),
+            "expected": 1,
+            "ready": int(is_validated(dna_100kb_final)),
+        },
+        {
+            "stage": "92-93_96well_batch_species_summary",
+            "completed": int(is_validated(cross_well_final)),
+            "expected": 1,
+            "ready": int(is_validated(cross_well_final)),
+        },
+        {
+            "stage": "94-95_CB_overlap_across_96_wells",
+            "completed": int(is_validated(cb_overlap_final)),
+            "expected": 1,
+            "ready": int(is_validated(cb_overlap_final)),
+        },
+        {
+            "stage": "96-97_DNA_RNA_cell_QC_threshold_audit",
+            "completed": int(is_validated(threshold_audit_final)),
+            "expected": 1,
+            "ready": int(is_validated(threshold_audit_final)),
+        },
+        {
+            "stage": "98-100_RNA_species_alignment_audit",
+            "completed": rna_species_alignment_completed,
+            "expected": 96,
+            "ready": int(rna_species_alignment_completed == 96),
+        },
+        {
+            "stage": "101-102_RNA_species_residual_summary",
+            "completed": int(is_validated(rna_species_audit_final)),
+            "expected": 1,
+            "ready": int(is_validated(rna_species_audit_final)),
+        },
+        {
+            "stage": "103-106_DNA_100kb_UMAP_D20_D50",
+            "completed": dna_umap_completed,
+            "expected": 2,
+            "ready": int(dna_umap_completed == 2),
+        },
+        {
+            "stage": "107-108_DNA_100kb_UMAP_comparison",
+            "completed": int(is_validated(dna_umap_comparison)),
+            "expected": 1,
+            "ready": int(is_validated(dna_umap_comparison)),
         },
     ]
     output = args.output or input_root / "complete_matrix_progress.tsv"

@@ -50,6 +50,9 @@ rna = load("rna_complete_v19", "76_validate_rna_complete_matrix.py")
 bigwig = load(
     "single_base_bigwig_v19", "81_build_dna_single_base_bigwigs.py"
 )
+igv_bigwig = load(
+    "igv_species_bigwig_v20", "85_build_igv_species_bigwigs.py"
+)
 cell_qc = load(
     "single_cell_coverage_qc_v19",
     "83_summarize_dna_single_cell_qc.py",
@@ -830,6 +833,178 @@ class SingleBaseBigWigTests(unittest.TestCase):
                     )
 
 
+class IGVSpeciesBigWigTests(unittest.TestCase):
+    def test_species_prefixes_are_removed_without_changing_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            input_root = (
+                project
+                / "07_postmapping/complete_matrices/"
+                "dna_single_cytosine/bigwig"
+            )
+            input_root.mkdir(parents=True)
+            qc = (
+                project
+                / "08_qc_summary/24_dna_single_cytosine_bigwig"
+            )
+            qc.mkdir(parents=True)
+            (qc / "dna_single_base_bigwig_summary.tsv").write_text(
+                "metric\tvalue\n"
+                "status\tvalidated\n"
+                "pipeline_signature\t"
+                "snmar_single_base_bigwig_20260731\n",
+                encoding="utf-8",
+            )
+            rows = {
+                "human": ("human_1", 10, 3, 5, 2, 0.4),
+                "pig": ("pig_1", 20, 4, 7, 6, 6 / 7),
+            }
+            references = {}
+            for species, values in rows.items():
+                chrom, start, cells, covered, converted, fraction = values
+                reference = project / f"{species}.fa"
+                reference.write_text(">1\nA\n", encoding="ascii")
+                Path(str(reference) + ".fai").write_text(
+                    "1\t100\t3\t100\t101\n", encoding="ascii"
+                )
+                references[species] = reference
+                (input_root / f"{species}.chrom.sizes").write_text(
+                    f"{chrom}\t100\n", encoding="utf-8"
+                )
+                for context, label in (
+                    ("WCG", "methylation"),
+                    ("GCH", "accessibility"),
+                ):
+                    path = (
+                        input_root
+                        / f"{species}.{context}_{label}.per_base.tsv.gz"
+                    )
+                    with gzip.open(
+                        path, "wt", encoding="utf-8", newline=""
+                    ) as handle:
+                        writer = csv.DictWriter(
+                            handle,
+                            fieldnames=igv_bigwig.PER_BASE_FIELDS,
+                            delimiter="\t",
+                            lineterminator="\n",
+                        )
+                        writer.writeheader()
+                        writer.writerow(
+                            {
+                                "chrom": chrom,
+                                "start": start,
+                                "end": start + 1,
+                                "strand": "+",
+                                "covered_cells": cells,
+                                "covered_calls": covered,
+                                "converted_calls": converted,
+                                "signal_fraction": fraction,
+                            }
+                        )
+
+            converted_inputs: list[tuple[str, str]] = []
+
+            def fake_converter(command, check):
+                self.assertTrue(check)
+                bedgraph = Path(command[1]).read_text(encoding="utf-8")
+                chrom_sizes = Path(command[2]).read_text(encoding="utf-8")
+                converted_inputs.append((bedgraph, chrom_sizes))
+                Path(command[3]).write_bytes(b"fake-bigwig")
+                return mock.Mock(returncode=0)
+
+            old_argv = sys.argv
+            try:
+                sys.argv = [
+                    "85_igv_bigwig",
+                    "--project",
+                    str(project),
+                    "--human-reference",
+                    str(references["human"]),
+                    "--pig-reference",
+                    str(references["pig"]),
+                ]
+                with (
+                    mock.patch.object(
+                        igv_bigwig.shutil, "which", return_value="fake"
+                    ),
+                    mock.patch.object(
+                        igv_bigwig.subprocess,
+                        "run",
+                        side_effect=fake_converter,
+                    ),
+                ):
+                    self.assertEqual(igv_bigwig.main(), 0)
+            finally:
+                sys.argv = old_argv
+
+            output = input_root / "igv_species_reference"
+            self.assertEqual(len(converted_inputs), 12)
+            for bedgraph, chrom_sizes in converted_inputs:
+                self.assertNotIn("human_", bedgraph)
+                self.assertNotIn("pig_", bedgraph)
+                self.assertNotIn("human_", chrom_sizes)
+                self.assertNotIn("pig_", chrom_sizes)
+            self.assertTrue(any("1\t10\t11\t0.4\n" == item[0]
+                                for item in converted_inputs))
+            self.assertTrue(any("1\t20\t21\t7\n" == item[0]
+                                for item in converted_inputs))
+            for species in ("human", "pig"):
+                self.assertEqual(
+                    (
+                        output
+                        / f"{species}.species_reference.chrom.sizes"
+                    ).read_text(encoding="utf-8"),
+                    "1\t100\n",
+                )
+                for context, label in (
+                    ("WCG", "methylation"),
+                    ("GCH", "accessibility"),
+                ):
+                    for signal in (
+                        "fraction",
+                        "coverage",
+                        "covered_cells",
+                    ):
+                        self.assertTrue(
+                            (
+                                output
+                                / f"{species}.{context}_{label}_{signal}."
+                                "igv.bw"
+                            ).is_file()
+                        )
+            summary = igv_bigwig.read_metrics(
+                project
+                / "08_qc_summary/26_dna_igv_species_bigwig/"
+                "dna_igv_species_bigwig_summary.tsv"
+            )
+            self.assertEqual(summary["status"], "validated")
+            self.assertEqual(summary["signal_values_recalculated"], "0")
+
+    def test_prefix_removal_rejects_target_name_collisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "pig.chrom.sizes"
+            path.write_text(
+                "pig_1\t100\n"
+                "pig_1\t200\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "collision"):
+                igv_bigwig.load_chromosomes(path, "pig")
+
+    def test_target_reference_fai_must_match_names_and_lengths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "pig.fa"
+            reference.write_text(">1\nA\n", encoding="ascii")
+            Path(str(reference) + ".fai").write_text(
+                "chr1\t100\t6\t100\t101\n", encoding="ascii"
+            )
+            with self.assertRaisesRegex(ValueError, "do not match"):
+                igv_bigwig.validate_species_reference(
+                    reference, [("pig_1", "1", 100)]
+                )
+
+
 class SingleCellCoverageQCTests(unittest.TestCase):
     def test_species_reference_coverage_is_added_without_filtering(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -967,6 +1142,13 @@ class ScriptInventoryTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('BIGWIG_ENV="${BIGWIG_ENV:-foodie_env}"', submission)
         self.assertIn("bedGraphToBigWig", submission)
+        igv_submission = (
+            script("86_submit_igv_species_bigwigs_16core.csub")
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'BIGWIG_ENV="${BIGWIG_ENV:-foodie_env}"', igv_submission
+        )
+        self.assertIn('SPECIES="${SPECIES:-all}"', igv_submission)
 
     def test_v19_numbered_steps_are_complete(self) -> None:
         expected = {
@@ -992,6 +1174,8 @@ class ScriptInventoryTests(unittest.TestCase):
             82: "82_submit_dna_single_base_bigwigs_16core.csub",
             83: "83_summarize_dna_single_cell_qc.py",
             84: "84_submit_dna_single_cell_qc_8core.csub",
+            85: "85_build_igv_species_bigwigs.py",
+            86: "86_submit_igv_species_bigwigs_16core.csub",
         }
         for number, filename in expected.items():
             self.assertTrue(script(filename).is_file(), number)
